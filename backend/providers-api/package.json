@@ -1,0 +1,17 @@
+{
+  "name": "providers-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@p-stream/providers": "github:p-stream/providers#production",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

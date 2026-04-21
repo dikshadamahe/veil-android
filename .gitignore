@@ -1,9 +1,36 @@
-.codex/.env
+.codex/
+.claude/
+.cursor/
+.idea/
+.kiro/
+.mcp.json
+.metadata
+.opencode.json
+.windsurfrules
+.cursorrules
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+PROGRESS.md
+PROMPTS.md
+SETUP.md
+release.yml
+switch-dev.sh
+pstream_kt_v3_final.html
 PAT.txt
+ssh-key-*.key
+ssh-key-*.pub
+*.iml
+.codex/.env
 *.keystore
 key.properties
 .dart_tool/
 build/
 .flutter-plugins
 .flutter-plugins-dependencies
+node_modules/
+.pnpm-store/
+backend/**/.env
 
+# Added by code-review-graph
+.code-review-graph/
