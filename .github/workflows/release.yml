@@ -1,0 +1,62 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and publish'
+        required: true
+        default: 'v0.1.0-mvp'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build release APK
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      ORACLE_URL: ${{ secrets.ORACLE_URL }}
+      TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
+
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Build APK
+        run: >-
+          flutter build apk --release
+          --dart-define=ORACLE_URL="${ORACLE_URL}"
+          --dart-define=TMDB_TOKEN="${TMDB_TOKEN}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: PStream Android ${{ env.RELEASE_TAG }}
+          prerelease: true
+          files: build/app/outputs/flutter-apk/app-release.apk
