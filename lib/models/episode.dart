@@ -20,8 +20,8 @@ class Episode {
       id: '${json['id'] ?? ''}',
       number: _parseInt(json['episode_number'] ?? json['number']),
       title: (json['name'] ?? json['title'] ?? '') as String,
-      airDate: _parseStringOrNull(json['air_date']),
-      stillPath: _parseStringOrNull(json['still_path']),
+      airDate: _parseStringOrNull(json['air_date'] ?? json['airDate']),
+      stillPath: _parseStringOrNull(json['still_path'] ?? json['stillPath']),
       overview: (json['overview'] ?? '') as String,
     );
   }
