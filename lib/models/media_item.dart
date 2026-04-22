@@ -12,6 +12,9 @@ class MediaItem {
     required this.imdbId,
     required this.rating,
     required this.seasons,
+    this.genres = const <MediaGenre>[],
+    this.credits = const <MediaCredit>[],
+    this.runtimeMins,
   });
 
   final int tmdbId;
@@ -24,6 +27,9 @@ class MediaItem {
   final String? imdbId;
   final double rating;
   final List<Season> seasons;
+  final List<MediaGenre> genres;
+  final List<MediaCredit> credits;
+  final int? runtimeMins;
 
   bool get isMovie => type == 'movie';
   bool get isShow => type == 'show';
@@ -32,11 +38,13 @@ class MediaItem {
     final String type = _parseType(json);
 
     return MediaItem(
-      tmdbId: _parseInt(json['id']),
+      tmdbId: _parseInt(json['id'] ?? json['tmdbId']),
       type: type,
       title: (json['title'] ?? json['name'] ?? '') as String,
       overview: (json['overview'] ?? '') as String,
-      posterPath: _parseStringOrNull(json['poster_path'] ?? json['posterPath']),
+      posterPath: _parseStringOrNull(
+        json['poster_path'] ?? json['posterPath'] ?? json['poster'],
+      ),
       backdropPath: _parseStringOrNull(
         json['backdrop_path'] ?? json['backdropPath'],
       ),
@@ -53,6 +61,20 @@ class MediaItem {
       seasons: ((json['seasons'] as List?) ?? const <dynamic>[])
           .map((dynamic season) => Season.fromTmdb(_asMap(season)))
           .toList(),
+      genres: ((json['genres'] as List?) ?? const <dynamic>[])
+          .map((dynamic genre) => MediaGenre.fromJson(_asMap(genre)))
+          .where((MediaGenre genre) => genre.name.isNotEmpty)
+          .toList(),
+      credits:
+          ((((json['credits'] as Map?)?['cast']) as List?) ??
+                  (json['credits'] as List?) ??
+                  const <dynamic>[])
+              .map((dynamic credit) => MediaCredit.fromJson(_asMap(credit)))
+              .where((MediaCredit credit) => credit.name.isNotEmpty)
+              .toList(),
+      runtimeMins: _parseNullableInt(
+        json['runtime'] ?? json['episode_run_time']?.first,
+      ),
     );
   }
 
@@ -64,6 +86,14 @@ class MediaItem {
     }
 
     return 'https://image.tmdb.org/t/p/$size$posterPath';
+  }
+
+  String? backdropUrl([String size = 'original']) {
+    if (backdropPath == null || backdropPath!.isEmpty) {
+      return null;
+    }
+
+    return 'https://image.tmdb.org/t/p/$size$backdropPath';
   }
 
   Map<String, String> toScrapeQueryParameters({
@@ -118,6 +148,16 @@ class MediaItem {
     return int.tryParse('$value') ?? 0;
   }
 
+  static int? _parseNullableInt(dynamic value) {
+    if (value == null) {
+      return null;
+    }
+    if (value is int) {
+      return value;
+    }
+    return int.tryParse('$value');
+  }
+
   static double _parseDouble(dynamic value) {
     if (value is num) {
       return value.toDouble();
@@ -138,5 +178,64 @@ class MediaItem {
     return Map<String, dynamic>.from(
       value as Map? ?? const <String, dynamic>{},
     );
+  }
+}
+
+class MediaGenre {
+  const MediaGenre({required this.id, required this.name});
+
+  final int id;
+  final String name;
+
+  factory MediaGenre.fromJson(Map<String, dynamic> json) {
+    return MediaGenre(
+      id: json['id'] is int
+          ? json['id'] as int
+          : int.tryParse('${json['id']}') ?? 0,
+      name: '${json['name'] ?? ''}'.trim(),
+    );
+  }
+}
+
+class MediaCredit {
+  const MediaCredit({
+    required this.id,
+    required this.name,
+    this.character,
+    this.profilePath,
+  });
+
+  final int id;
+  final String name;
+  final String? character;
+  final String? profilePath;
+
+  factory MediaCredit.fromJson(Map<String, dynamic> json) {
+    return MediaCredit(
+      id: json['id'] is int
+          ? json['id'] as int
+          : int.tryParse('${json['id']}') ?? 0,
+      name: '${json['name'] ?? ''}'.trim(),
+      character: _parseStringOrNull(json['character']),
+      profilePath: _parseStringOrNull(
+        json['profile_path'] ?? json['profilePath'],
+      ),
+    );
+  }
+
+  String? profileUrl([String size = 'w185']) {
+    if (profilePath == null || profilePath!.isEmpty) {
+      return null;
+    }
+    return 'https://image.tmdb.org/t/p/$size$profilePath';
+  }
+
+  static String? _parseStringOrNull(dynamic value) {
+    if (value == null) {
+      return null;
+    }
+
+    final String parsed = '$value'.trim();
+    return parsed.isEmpty ? null : parsed;
   }
 }

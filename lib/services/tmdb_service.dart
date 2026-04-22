@@ -64,7 +64,7 @@ class TmdbService {
     final Map<String, dynamic> json = await _getJson(
       '$endpointType/$id',
       queryParameters: const <String, String>{
-        'append_to_response': 'external_ids',
+        'append_to_response': 'external_ids,credits',
       },
     );
 

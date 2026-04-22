@@ -64,16 +64,19 @@ class MediaCard extends StatelessWidget {
                       children: <Widget>[
                         ColoredBox(
                           color: AppColors.mediaCardHoverBackground,
-                          child: mediaItem.posterUrl() == null
-                              ? const _MediaCardPosterPlaceholder()
-                              : CachedNetworkImage(
-                                  imageUrl: mediaItem.posterUrl()!,
-                                  fit: BoxFit.cover,
-                                  placeholder: (_, __) =>
-                                      const _MediaCardPosterPlaceholder(),
-                                  errorWidget: (_, __, ___) =>
-                                      const _MediaCardPosterPlaceholder(),
-                                ),
+                          child: Hero(
+                            tag: 'poster-${mediaItem.tmdbId}',
+                            child: mediaItem.posterUrl() == null
+                                ? const _MediaCardPosterPlaceholder()
+                                : CachedNetworkImage(
+                                    imageUrl: mediaItem.posterUrl()!,
+                                    fit: BoxFit.cover,
+                                    placeholder: (_, __) =>
+                                        const _MediaCardPosterPlaceholder(),
+                                    errorWidget: (_, __, ___) =>
+                                        const _MediaCardPosterPlaceholder(),
+                                  ),
+                          ),
                         ),
                         const DecoratedBox(
                           decoration: BoxDecoration(

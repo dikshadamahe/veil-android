@@ -164,6 +164,20 @@ class LocalStorage {
       'year': mediaItem.year,
       'imdbId': mediaItem.imdbId,
       'rating': mediaItem.rating,
+      'runtimeMins': mediaItem.runtimeMins,
+      'genres': mediaItem.genres
+          .map((genre) => <String, dynamic>{'id': genre.id, 'name': genre.name})
+          .toList(),
+      'credits': mediaItem.credits
+          .map(
+            (credit) => <String, dynamic>{
+              'id': credit.id,
+              'name': credit.name,
+              'character': credit.character,
+              'profilePath': credit.profilePath,
+            },
+          )
+          .toList(),
       'seasons': mediaItem.seasons
           .map(
             (season) => <String, dynamic>{
