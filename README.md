@@ -51,7 +51,7 @@ Design and behavior are aligned with the **xp-technologies-dev/p-stream** web re
 - **providers-api** — Node + Express wrapper around `@p-stream/providers`; lives in this repo under `backend/providers-api`.
 - **simple-proxy** — Run separately (e.g. on the same VM) for CORS/header-sensitive fetches. Reference: [xp-technologies-dev/simple-proxy](https://github.com/xp-technologies-dev/simple-proxy).
 - **Providers package** — Install from [xp-technologies-dev/providers](https://github.com/xp-technologies-dev/providers); the npm name remains `@p-stream/providers`.
-- **Scraper ids / Oracle** — See [`backend/providers-api/README.md`](backend/providers-api/README.md) and [`backend/providers-api/docs/CUSTOM_EMBED_INTEGRATION.md`](backend/providers-api/docs/CUSTOM_EMBED_INTEGRATION.md) (2Embed.cc, vidsrcme.su, AutoEmbed vs `autoembed-english`, CinePro Core OMSS).
+- **Scraper ids / Oracle** — See [`backend/providers-api/README.md`](backend/providers-api/README.md) and [`backend/providers-api/docs/CUSTOM_EMBED_INTEGRATION.md`](backend/providers-api/docs/CUSTOM_EMBED_INTEGRATION.md) (vidsrc-embed.ru, 2Embed.cc, AutoEmbed unchanged, CinePro Core OMSS).
 
 ---
 

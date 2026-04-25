@@ -8,7 +8,7 @@ There is no separate **`@pstream-backend`** package in the Android repo: Oracle 
 
 ## Adding scrapers (VidSrc.me, 2Embed.cc, AutoEmbed, CinePro, …)
 
-Step-by-step for **domains + APIs you listed** (vidsrcme.su, 2embed.cc, autoembed.cc, CinePro Core): see **[docs/CUSTOM_EMBED_INTEGRATION.md](docs/CUSTOM_EMBED_INTEGRATION.md)**.
+Step-by-step for **domains + APIs you listed** (`vidsrc-embed.ru`, 2embed.cc, AutoEmbed leave-as-is, CinePro Core): see **[docs/CUSTOM_EMBED_INTEGRATION.md](docs/CUSTOM_EMBED_INTEGRATION.md)**.
 
 Short version:
 

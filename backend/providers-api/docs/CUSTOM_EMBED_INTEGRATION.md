@@ -1,98 +1,169 @@
-# Integrating third-party embeds (vidsrcme, 2Embed, AutoEmbed, CinePro)
+# Integrating third-party embeds (VidSrc embed, 2Embed, AutoEmbed, CinePro)
 
 Veil’s Android app only talks to **`providers-api`** (`ORACLE_URL`). That service calls **`@p-stream/providers`** `runAll({ media, sourceOrder? })`. **New sites are not configured in Flutter or in this Express file alone** — each one needs a **sourcerer** (TypeScript) in the providers library that returns the shape `normalizeRunOutput` already expects (stream and/or embeds).
 
-Your Oracle **`/sources`** (example `140.245.199.210:3001`) already exposes real **source** ids such as `vidlink`, `fedapi`, `fedapidb`, … and **embed** ids such as `autoembed-english`. Those strings are what `sourceOrder` must use—not marketing domain names.
+Your Oracle **`/sources`** JSON is the source of truth for which **source** `id` values exist (e.g. `vidlink`, `fedapi`, …) and which **embed** ids exist (e.g. `autoembed-english`). `SCRAPE_SOURCE_ORDER` uses **source** ids only.
 
 ---
 
-## 1. vidsrcme.su (VidSrc.me)
+## 1. VidSrc embed (`vidsrc-embed.ru`) — API reference for implementers
 
-**Today:** there is no `vidsrcme` id in the stock `@p-stream/providers` tree you are running; anything VidSrc‑like upstream is usually a different host/id (e.g. archived `vidsrc*` paths).
+Public embed base (documented by operator):
 
-**To add it**
+- **Host:** `https://vidsrc-embed.ru`
 
-1. Fork **[xp-technologies-dev/providers](https://github.com/xp-technologies-dev/providers)** (or get write access).
-2. Add `src/providers/sources/vidsrcme.ts` (name illustrative) using `makeSourcerer`:
-   - `scrapeMovie` / `scrapeShow`: build the correct watch or API URL from `ctx.media` (TMDB id, season/episode, `imdbId` when required).
-   - Return either **`stream`** (direct HLS/DASH/file) and/or **`embeds: [{ embedId, url }]`** where `embedId` is a **registered embed** in the same package (or add a dedicated embed scraper if the iframe needs extraction).
-3. Register the sourcerer in the package entry that lists active sources for `targets.NATIVE`.
-4. Point **`backend/providers-api/package.json`** at your Git branch/commit, `pnpm install`, redeploy Oracle, `pm2 restart providers-api`.
-5. Confirm with `curl …/sources` that **`id":"vidsrcme"`** (or whatever you chose) appears.
+These URLs are **iframe embed pages**, not guaranteed direct HLS files. A sourcerer usually returns them as **`embeds: [{ embedId, url }]`** so an embed resolver can extract playback, unless you parse the player and emit a **`stream`** object.
 
-**You must send:** example HTTP responses (HTML or JSON) for one movie and one TV episode, plus any required headers or query params, so the sourcerer can be implemented without guesswork.
+### 1.1 Movie embed
+
+**Path / query:** `https://vidsrc-embed.ru/embed/movie`
+
+| Parameter | Required | Notes |
+|-----------|------------|--------|
+| `imdb` or path `…/movie/{tt…}` | one of imdb / tmdb | IMDb `tt…` |
+| `tmdb` or path `…/movie/{id}` | one of imdb / tmdb | TMDB numeric id |
+| `sub_url` | no | URL-encoded `.srt` or `.vtt`; must be **CORS**-reachable from the embed |
+| `ds_lang` | no | Default subtitle language, ISO 639 code |
+| `autoplay` | no | `1` or `0` (default on) |
+
+**Examples**
+
+```http
+https://vidsrc-embed.ru/embed/movie/tt5433140
+https://vidsrc-embed.ru/embed/movie?imdb=tt5433140
+https://vidsrc-embed.ru/embed/movie?imdb=tt5433140&ds_lang=de
+https://vidsrc-embed.ru/embed/movie?imdb=tt5433140&sub_url=https%3A%2F%2Fvidsrc.me%2Fsample.srt&autoplay=1
+https://vidsrc-embed.ru/embed/movie/385687
+https://vidsrc-embed.ru/embed/movie?tmdb=385687
+https://vidsrc-embed.ru/embed/movie?tmdb=385687&ds_lang=de
+https://vidsrc-embed.ru/embed/movie?tmdb=385687&sub_url=https%3A%2F%2Fvidsrc.me%2Fsample.srt&autoplay=1
+```
+
+### 1.2 TV show (series) vs episode embed
+
+**Base:** `https://vidsrc-embed.ru/embed/tv`
+
+| Parameter | Required | Notes |
+|-----------|------------|--------|
+| `imdb` or path `…/tv/{tt…}` | one of imdb / tmdb | Series-level |
+| `tmdb` or path `…/tv/{id}` | one of imdb / tmdb | Series TMDB id |
+| `season` | **yes** for a specific episode | Episode context |
+| `episode` | **yes** for a specific episode | Episode context |
+| `sub_url` | no | Same CORS rules as movie |
+| `ds_lang` | no | ISO 639 |
+| `autoplay` | no | `1` / `0` |
+| `autonext` | no | `1` / `0` (default **off**) |
+
+**Examples (note `&` between query params)**
+
+```http
+https://vidsrc-embed.ru/embed/tv/tt0944947
+https://vidsrc-embed.ru/embed/tv?imdb=tt0944947
+https://vidsrc-embed.ru/embed/tv?imdb=tt0944947&ds_lang=de
+https://vidsrc-embed.ru/embed/tv/1399
+https://vidsrc-embed.ru/embed/tv?tmdb=1399&ds_lang=de
+https://vidsrc-embed.ru/embed/tv/tt0944947/1-1
+https://vidsrc-embed.ru/embed/tv?imdb=tt0944947&season=1&episode=1
+https://vidsrc-embed.ru/embed/tv?imdb=tt0944947&season=1&episode=1&ds_lang=de
+https://vidsrc-embed.ru/embed/tv?imdb=tt0944947&season=1&episode=1&sub_url=https%3A%2F%2Fvidsrc.me%2Fsample.srt&autoplay=1&autonext=1
+https://vidsrc-embed.ru/embed/tv/1399/1-1
+https://vidsrc-embed.ru/embed/tv?tmdb=1399&season=1&episode=1
+https://vidsrc-embed.ru/embed/tv?tmdb=1399&season=1&episode=1&ds_lang=de
+https://vidsrc-embed.ru/embed/tv?tmdb=1399&season=1&episode=1&sub_url=https%3A%2F%2Fvidsrc.me%2Fsample.srt&autoplay=1&autonext=1
+```
+
+### 1.3 JSON discovery feeds (optional for catalog UIs, not required for Veil scrape)
+
+Replace `PAGE_NUMBER` with an integer ≥ 1.
+
+```http
+https://vidsrc-embed.ru/movies/latest/page-1.json
+https://vidsrc-embed.ru/tvshows/latest/page-1.json
+https://vidsrc-embed.ru/episodes/latest/page-1.json
+```
+
+### 1.4 Adding this in `@p-stream/providers`
+
+1. Fork **[xp-technologies-dev/providers](https://github.com/xp-technologies-dev/providers)**.
+2. Add a sourcerer (e.g. `vidsrcembed`) that, from `ctx.media`, builds the **movie** or **tv + season + episode** URL above (prefer TMDB when `ctx.media.tmdbId` is set; use `imdbId` with `tt` prefix when required).
+3. Return **`embeds`** pointing at the iframe URL, with an `embedId` your pipeline can resolve—or implement stream extraction if you have a stable parser.
+4. Register for `targets.NATIVE`, bump dependency in **`backend/providers-api`**, redeploy Oracle, verify `GET /sources` lists the new **`id`**.
 
 ---
 
-## 2. 2Embed.cc (embed URLs + JSON API)
+## 2. 2Embed.cc — embed URLs + JSON API (operator spec)
 
-Official patterns you shared (implementer spec):
+### 2.1 Iframe embeds
 
-| Mode | Pattern |
-|------|---------|
-| Movie by IMDb | `https://www.2embed.cc/embed/{imdbId}` |
-| Movie by TMDB | `https://www.2embed.cc/embed/{tmdbNumericId}` |
-| TV by IMDb | `https://www.2embed.cc/embedtv/{imdbId}&s={season}&e={episode}` |
-| TV by TMDB | `https://www.2embed.cc/embedtv/{tmdbId}&s={season}&e={episode}` |
-| Full season IMDb | `https://www.2embed.cc/embedtvfull/{imdbId}` |
-| Full season TMDB | `https://www.2embed.cc/embedtvfull/{tmdbId}` |
+| Mode | URL pattern |
+|------|----------------|
+| Movie by IMDb | `https://www.2embed.cc/embed/{imdbId}` e.g. `…/embed/tt10676048` |
+| Movie by TMDB | `https://www.2embed.cc/embed/{tmdbNumericId}` e.g. `…/embed/609681` |
+| TV episode by IMDb | `https://www.2embed.cc/embedtv/{imdbId}&s={season}&e={episode}` |
+| TV episode by TMDB | `https://www.2embed.cc/embedtv/{tmdbId}&s={season}&e={episode}` |
+| Full season by IMDb | `https://www.2embed.cc/embedtvfull/{imdbId}` |
+| Full season by TMDB | `https://www.2embed.cc/embedtvfull/{tmdbId}` |
 
-JSON API (examples):
+### 2.2 JSON API (`api.2embed.cc`)
 
-- Movie metadata: `https://api.2embed.cc/movie?imdb_id=…`
-- TV metadata: `https://api.2embed.cc/tv?imdb_id=…`
-- Season: `https://api.2embed.cc/season?imdb_id=…&season=…`
-- Search / trending / similar: paths under `https://api.2embed.cc/…` as in their docs.
+Endpoints support **`imdb_id` / `tmdb_id`** where applicable (per operator docs).
 
-**There is no `2embed` source id** in the public providers tree until someone adds it.
+| Purpose | Endpoint |
+|---------|-----------|
+| Movie details | `https://api.2embed.cc/movie?imdb_id={tt…}` (and/or tmdb params per their spec) |
+| Trending movies | `https://api.2embed.cc/trending?time_window={day\|week\|month}&page={1…N}` |
+| Search movies | `https://api.2embed.cc/search?q={keyword}&page={1…N}` |
+| Similar movies | `https://api.2embed.cc/similar?imdb_id={tt…}&page={1…N}` |
+| TV details | `https://api.2embed.cc/tv?imdb_id={tt…}` |
+| Trending TV | `https://api.2embed.cc/trendingtv?time_window={day\|week\|month}&page={1…N}` |
+| Search TV | `https://api.2embed.cc/searchtv?q={keyword}&page={1…N}` |
+| Similar TV | `https://api.2embed.cc/similartv?imdb_id={tt…}&page={1…N}` |
+| Season details | `https://api.2embed.cc/season?imdb_id={tt…}&season={1…N}` |
 
-**Implementation sketch in `providers`**
-
-- New sourcerer id e.g. **`twoembed`** (avoid numeric-leading ids).
-- Prefer **TMDB** when `ctx.media.tmdbId` is present (Veil always has it from TMDB); fall back to `imdbId` when embed URL requires `tt…`.
-- Minimal viable path: return **`embeds: [{ embedId: '<existing-player-embed>', url: '<2embed iframe url>' }]`** if a generic embed scraper can resolve the iframe to a stream; otherwise parse their player page or JSON API inside the sourcerer and return **`stream`** with playlist/qualities.
-
-**You must send:** one successful `curl` response body for `api.2embed.cc/movie?…` and one for TV season, plus whether playback must go through **simple-proxy** (headers/referrer).
-
----
-
-## 3. AUTOEMBED (autoembed.cc / watch-v2.autoembed.app)
-
-On **your** Oracle embed list, the id is **`autoembed-english`** (type `embed`), not necessarily a top-level **source** named `autoembed`.
-
-Upstream `@p-stream/providers` may still ship a **source** `autoembed` that targets `tom.autoembed.cc` APIs; it can be disabled or absent depending on branch.
-
-**Options**
-
-- **A)** If `fedapi` / `vidlink` already resolve streams that internally use AutoEmbed players, you may not need a separate sourcerer—tune **`SCRAPE_SOURCE_ORDER`** only.
-- **B)** To prioritize AutoEmbed’s own API, add or re-enable the **`autoembed`** sourcerer in your providers fork and map it to current domains (`watch-v2.autoembed.app`, etc.), then redeploy.
-- **C)** If only the **embed iframe** is needed, return `embeds` with `embedId: 'autoembed-english'` and the watch URL; the embed pipeline must know how to extract the stream from that page.
-
-**You must send:** which domain is canonical today and a sample “get stream” JSON (redact tokens).
+**Implementation:** same as §1 — new sourcerer id (e.g. `twoembed`), map `ctx.media` → URLs or API, return `embeds` / `stream` as supported by your embed pipeline.
 
 ---
 
-## 4. CinePro (Mintlify / CinePro Core)
+## 3. AutoEmbed — **no change**
 
-CinePro Core is a **different product** from `@p-stream/providers`: an **OMSS** HTTP API (see [introduction](https://cinepro.mintlify.app/introduction.md) and [OpenAPI](https://cinepro.mintlify.app/core/api-reference/introduction.md)).
+There is **no stable public AutoEmbed API spec** in scope here, and existing Oracle **`/sources`** / embed ids already cover typical flows (`autoembed-english`, etc.).
 
-Examples from the docs:
+**Policy for this repo:** do **not** require AutoEmbed-specific app or `providers-api` changes until an upstream sourcerer + docs exist. Keep **`SCRAPE_SOURCE_ORDER`** aligned with **`GET /sources`** **source** ids only.
 
-- Movie sources by TMDB id: **`GET /v1/movies/{id}`** on *your* Core base URL.
-- TV episode: **`GET /v1/tv/{id}/seasons/{season}/episodes/{episode}`** (see [TV Shows](https://cinepro.mintlify.app/core/api-reference/content/get-streaming-sources-for-a-tv-episode.md) in the index).
-- Responses use **proxy paths** (`/v1/proxy?data=…`), not raw CDN URLs.
+---
 
-**Ways to integrate with Veil**
+## 4. CinePro Core — docs-grounded integration notes
 
-| Approach | Pros | Cons |
-|----------|------|------|
-| **A. Sidecar:** Run CinePro Core on the VM (Docker). Add a small **bridge route** in `providers-api` that calls Core and maps OMSS `SourceResponse` → the JSON shape Veil already consumes. | No fork of `providers` | You maintain mapping + auth + versioning |
-| **B. Sourcerer in `providers`:** HTTP client from TypeScript to Core’s `/v1/...`, map to `SourcererOutput`. | Single `runAll` pipeline | Fork + Node fetch to Core must be reliable |
-| **C. Flutter → Core directly** | Skips Oracle scrape | Breaks Veil’s “one ORACLE_URL” model; duplicates proxy/CORS logic |
+CinePro Core is **self-hosted** ([introduction](https://cinepro.mintlify.app/introduction.md)); there is **no fixed global base URL** in the docs.
 
-Recommended: **A or B** with Core on the same private network as `providers-api`.
+| Topic | Docs-grounded behavior |
+|-------|-------------------------|
+| **Base URL** | Whatever you deploy, e.g. `http://localhost:<PORT>` (often `3000` in examples)—**you** choose host/port. |
+| **Authentication** | **No mandatory API key / token** described for Core in the intro; treat as a **private local** service. You may add **your own** reverse proxy auth if exposed beyond localhost. Docs warn Core is **not secure for public hosting by default**. |
+| **Movie sources** | **`GET /v1/movies/{tmdbId}`** — TMDB id in path ([Movies](https://cinepro.mintlify.app/core/api-reference/content/get-streaming-sources-for-a-movie.md)). |
+| **TV episode sources** | See [TV Shows](https://cinepro.mintlify.app/core/api-reference/content/get-streaming-sources-for-a-tv-episode.md) in the docs index for the OMSS path shape. |
+| **Response shape** | OMSS-style: includes **`sources`**, **`subtitles`**, **`responseId`**, **`expiresAt`**, often **proxy URLs** (`/v1/proxy?data=…`), not raw CDN links. Exact field names follow the OpenAPI spec—not reprinted here. |
 
-**You must send:** base URL of your Core instance, auth header if any, and one sample `GET /v1/movies/{tmdbId}` JSON (redacted).
+**Illustrative JSON (structure only — not a verbatim doc excerpt):**
+
+```json
+{
+  "responseId": "uuid",
+  "expiresAt": "2026-01-15T18:00:00Z",
+  "sources": [
+    {
+      "url": "/v1/proxy?data=…",
+      "type": "hls",
+      "quality": "1080p",
+      "provider": { "id": "…", "name": "…" }
+    }
+  ],
+  "subtitles": [],
+  "diagnostics": []
+}
+```
+
+**Integration with Veil:** same three approaches as before — **bridge in `providers-api`**, **sourcerer in `providers`**, or **sidecar** Core on the VM; map OMSS → Veil’s existing scrape result JSON.
 
 ---
 
@@ -106,11 +177,6 @@ Recommended: **A or B** with Core on the same private network as `providers-api`
 
 ---
 
-## 6. Quick reference: your current Oracle source ids (excerpt)
+## 6. Quick reference: Oracle `GET /sources`
 
-From a live `/sources` response, **sources** include (among others):  
-`vidlink`, `fedapi`, `fedapidb`, `ridomovies`, `fsharetv`, `ee3`, `animekai`, `rgshows`, `vidrock`, `tugaflix`, `movies4f`, `fsonline`, …  
-
-**Embeds** include: `autoembed-english`, `filemoon`, `streamtape`, …  
-
-Use only ids that appear in **your** JSON when setting `SCRAPE_SOURCE_ORDER`.
+Use only **source** `id` values from **your** JSON for `SCRAPE_SOURCE_ORDER` (e.g. `vidlink`, `fedapi`, `fedapidb`, …). **Embeds** (e.g. `autoembed-english`) are separate and are not passed as `sourceOrder`.
