@@ -54,7 +54,7 @@ jobs:
           --dart-define=TMDB_TOKEN="${TMDB_TOKEN}"
 
       - name: Rename APK artifact
-        run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/apk_release.apk
+        run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/veil.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -62,4 +62,4 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: APK Release ${{ env.RELEASE_TAG }}
           prerelease: true
-          files: build/app/outputs/flutter-apk/apk_release.apk
+          files: build/app/outputs/flutter-apk/veil.apk
