@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/config/app_theme.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 
@@ -116,14 +115,9 @@ class SettingsScreen extends ConsumerWidget {
             const SizedBox(height: AppSpacing.x4),
             _SettingsSection(
               title: 'Environment',
-              subtitle: 'Runtime values and project endpoints.',
+              subtitle: 'Build and release information.',
               child: Column(
                 children: <Widget>[
-                  _SettingsInfoTile(
-                    title: 'Oracle proxy',
-                    value: AppConfig.proxyBaseUrl,
-                  ),
-                  const SizedBox(height: AppSpacing.x3),
                   const _SettingsInfoTile(
                     title: 'App version',
                     value: '1.0.0+1',
