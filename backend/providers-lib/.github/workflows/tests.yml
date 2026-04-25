@@ -1,0 +1,42 @@
+name: Testing
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - dev
+
+jobs:
+  testing:
+    name: Testing
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 8
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install packages
+        run: pnpm install --frozen-lockfile
+
+      - name: Install puppeteer
+        run: node ./node_modules/puppeteer/install.mjs
+
+      - name: Run tests
+        run: pnpm run test
+
+      - name: Run integration tests
+        run: pnpm run build && pnpm run test:integration
+
+      - name: Run linting
+        run: pnpm run lint

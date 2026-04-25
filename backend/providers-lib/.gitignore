@@ -1,0 +1,8 @@
+node_modules/
+.docs/
+/lib
+coverage
+.env
+.eslintcache
+/lib-obf
+.DS_Store

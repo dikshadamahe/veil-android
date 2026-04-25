@@ -31,6 +31,7 @@ build/
 node_modules/
 .pnpm-store/
 backend/**/.env
+docs/agents/**
 
 # Added by code-review-graph
 .code-review-graph/
