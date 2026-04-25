@@ -44,7 +44,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   void _onQueryChanged() {
     _debounce?.cancel();
     final String query = _controller.text.trim();
-    _debounce = Timer(const Duration(milliseconds: 400), () {
+    _debounce = Timer(const Duration(milliseconds: 250), () {
       if (!mounted) {
         return;
       }
@@ -72,7 +72,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
             context,
           ).textTheme.bodyLarge?.copyWith(color: AppColors.searchText),
           decoration: InputDecoration(
-            hintText: 'Search movies and shows',
+            hintText: 'Search titles, actors, or directors',
             prefixIcon: const Icon(Icons.search_rounded),
             suffixIcon: hasQuery
                 ? IconButton(
@@ -86,10 +86,34 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         ),
       ),
       body: SafeArea(
-        child: _SearchResultsGrid(
-          title: hasQuery ? null : 'Trending Suggestions',
-          items: data.value ?? const <MediaItem>[],
-          isLoading: data.isLoading,
+        child: data.when(
+          data: (List<MediaItem> items) {
+            if (items.isEmpty) {
+              return _SearchMessageState(
+                title: hasQuery ? 'No results found.' : 'Nothing to show yet.',
+                message: hasQuery
+                    ? 'Try a different title or keyword.'
+                    : 'Trending suggestions came back empty.',
+              );
+            }
+
+            return _SearchResultsGrid(
+              title: hasQuery ? null : 'Trending Suggestions',
+              items: items,
+              isLoading: false,
+            );
+          },
+          loading: () => _SearchResultsGrid(
+            title: hasQuery ? null : 'Trending Suggestions',
+            items: const <MediaItem>[],
+            isLoading: true,
+          ),
+          error: (Object error, StackTrace stackTrace) {
+            return _SearchMessageState(
+              title: 'Could not load search data.',
+              message: _friendlySearchMessage(error),
+            );
+          },
         ),
       ),
     );
@@ -161,4 +185,53 @@ class _SearchResultsGrid extends StatelessWidget {
       ],
     );
   }
+}
+
+class _SearchMessageState extends StatelessWidget {
+  const _SearchMessageState({
+    required this.title,
+    required this.message,
+  });
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.x6),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: AppSpacing.x2),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _friendlySearchMessage(Object error) {
+  final String message = '$error';
+  if (message.contains('TMDB authorization failed')) {
+    return 'TMDB_TOKEN is invalid or expired in this build. Rebuild the app with the new read access token.';
+  }
+  if (message.contains('TimeoutException')) {
+    return 'TMDB timed out on this network. The app now retries once, but if it still fails, rebuild with the new token and test again on a stable connection.';
+  }
+  return message;
 }
