@@ -81,7 +81,16 @@ class StreamService {
           ),
         );
 
-        final http.StreamedResponse response = await client.send(request);
+        final http.StreamedResponse response = await client
+            .send(request)
+            .timeout(
+              const Duration(seconds: 25),
+              onTimeout: () {
+                throw TimeoutException(
+                  'Timed out connecting to the scrape service.',
+                );
+              },
+            );
         if (response.statusCode != 200) {
           throw _SseConnectionException(
             'SSE connection failed with status ${response.statusCode}.',
@@ -167,12 +176,8 @@ class StreamService {
           },
           cancelOnError: false,
         );
-      } on TimeoutException catch (error, stackTrace) {
-        closeResources();
-        if (!multi.isClosed) {
-          multi.addError(error, stackTrace);
-          multi.close();
-        }
+      } on TimeoutException {
+        await emitBlockingFallback();
       } on _SseConnectionException {
         await emitBlockingFallback();
       } on http.ClientException {
@@ -345,11 +350,13 @@ class StreamService {
     List<String>? sourceOrder,
   }) {
     final Uri base = _baseUri(path);
+    final List<String>? effectiveOrder =
+        sourceOrder ?? AppConfig.scrapeSourceOrderList;
     return base.replace(
       queryParameters: mediaItem.toScrapeQueryParameters(
         season: season,
         episode: episode,
-        sourceOrder: sourceOrder,
+        sourceOrder: effectiveOrder,
         seasonTmdbId: seasonTmdbId,
         episodeTmdbId: episodeTmdbId,
         seasonTitle: seasonTitle,

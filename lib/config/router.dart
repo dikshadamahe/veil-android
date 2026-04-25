@@ -21,10 +21,17 @@ final GoRouter appRouter = GoRouter(
         return AdaptiveNav(
           currentIndex: navigationShell.currentIndex,
           onDestinationSelected: (int index) {
-            navigationShell.goBranch(
-              index,
-              initialLocation: index == navigationShell.currentIndex,
-            );
+            // Use explicit locations so each tab always resolves (goBranch alone
+            // can fail to switch when branch restoration state is empty/stale).
+            const List<String> shellLocations = <String>[
+              '/',
+              '/search',
+              '/history',
+              '/settings',
+            ];
+            if (index >= 0 && index < shellLocations.length) {
+              context.go(shellLocations[index]);
+            }
           },
           child: navigationShell,
         );

@@ -6,9 +6,6 @@ import 'package:pstream_android/providers/storage_provider.dart';
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
-  static const String _releasesUrl =
-      'https://github.com/dikshadamahe/veil-android/releases';
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final List<MediaStat> stats = <MediaStat>[
@@ -108,24 +105,6 @@ class SettingsScreen extends ConsumerWidget {
                         }
                       },
                     ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: AppSpacing.x4),
-            _SettingsSection(
-              title: 'Environment',
-              subtitle: 'Build and release information.',
-              child: Column(
-                children: <Widget>[
-                  const _SettingsInfoTile(
-                    title: 'App version',
-                    value: '1.0.0+1',
-                  ),
-                  const SizedBox(height: AppSpacing.x3),
-                  const _SettingsInfoTile(
-                    title: 'GitHub releases',
-                    value: _releasesUrl,
                   ),
                 ],
               ),
@@ -367,43 +346,6 @@ class _SettingsActionTile extends StatelessWidget {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SettingsInfoTile extends StatelessWidget {
-  const _SettingsInfoTile({
-    required this.title,
-    required this.value,
-  });
-
-  final String title;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppColors.blackC100,
-        borderRadius: BorderRadius.circular(AppSpacing.x4),
-        border: Border.all(color: AppColors.dropdownBorder),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.x4),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(title, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: AppSpacing.x2),
-            SelectableText(
-              value,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: AppColors.typeText,
-                  ),
-            ),
-          ],
         ),
       ),
     );

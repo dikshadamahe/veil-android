@@ -110,6 +110,7 @@ The app reads **runtime** configuration (no secrets in source):
 | Define | Purpose |
 |--------|---------|
 | `ORACLE_URL` | Base URL of **providers-api** (e.g. `http://YOUR_VM_IP:3001`) |
+| `SCRAPE_SOURCE_ORDER` | Optional — comma-separated `@p-stream/providers` sourcerer ids (e.g. `vidlink,autoembed,insertunit`) sent as `sourceOrder` so the VM tries fast mirrors first. Leave unset for the default (`vidlink,autoembed,insertunit`). Use `--dart-define=SCRAPE_SOURCE_ORDER=` (empty value) to use the library’s full built-in order. |
 | `TMDB_TOKEN` | TMDB **read** access token |
 | `WYZIE_API_KEY` | Optional — [Wyzie Subs](https://sub.wyzie.io/redeem) key for **Search online…** subtitles in the player |
 | `OPENSUBTITLES_API_KEY` | Optional — [OpenSubtitles.com](https://www.opensubtitles.com/en/consumers) REST **Api-Key** (search + download) |

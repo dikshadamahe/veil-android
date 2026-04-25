@@ -57,37 +57,48 @@ class AdaptiveNav extends StatelessWidget {
       body: Row(
         children: [
           SafeArea(
-            child: NavigationRail(
-              selectedIndex: currentIndex,
-              onDestinationSelected: onDestinationSelected,
-              extended: false,
-              labelType: NavigationRailLabelType.all,
-              backgroundColor: AppColors.backgroundSecondary,
-              indicatorColor: AppColors.buttonsToggle,
-              selectedIconTheme: IconThemeData(
-                color: AppColors.typeEmphasis,
-                size: railIconSize,
+            child: NavigationRailTheme(
+              data: NavigationRailThemeData(
+                minWidth: AppSpacing.x16,
+                groupAlignment: -1,
+                elevation: 0,
               ),
-              unselectedIconTheme: IconThemeData(
-                color: AppColors.typeSecondary,
-                size: railIconSize,
-              ),
-              selectedLabelTextStyle: Theme.of(
-                context,
-              ).textTheme.labelMedium?.copyWith(color: AppColors.typeEmphasis),
-              unselectedLabelTextStyle: Theme.of(context)
-                  .textTheme
-                  .labelMedium
-                  ?.copyWith(color: AppColors.typeSecondary),
-              destinations: _destinations
-                  .map(
-                    (destination) => NavigationRailDestination(
-                      icon: Icon(destination.icon),
-                      selectedIcon: Icon(destination.icon),
-                      label: Text(destination.label),
+              child: NavigationRail(
+                selectedIndex: currentIndex,
+                onDestinationSelected: onDestinationSelected,
+                extended: false,
+                labelType: NavigationRailLabelType.all,
+                backgroundColor: AppColors.backgroundSecondary,
+                indicatorColor: AppColors.buttonsToggle,
+                leading: const SizedBox(height: AppSpacing.x2),
+                selectedIconTheme: IconThemeData(
+                  color: AppColors.typeEmphasis,
+                  size: railIconSize,
+                ),
+                unselectedIconTheme: IconThemeData(
+                  color: AppColors.typeSecondary,
+                  size: railIconSize,
+                ),
+                selectedLabelTextStyle: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(
+                      color: AppColors.typeEmphasis,
+                      fontWeight: FontWeight.w600,
                     ),
-                  )
-                  .toList(growable: false),
+                unselectedLabelTextStyle: Theme.of(context)
+                    .textTheme
+                    .labelLarge
+                    ?.copyWith(color: AppColors.typeSecondary),
+                destinations: _destinations
+                    .map(
+                      (destination) => NavigationRailDestination(
+                        icon: Icon(destination.icon),
+                        selectedIcon: Icon(destination.icon),
+                        label: Text(destination.label),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
             ),
           ),
           const SizedBox(

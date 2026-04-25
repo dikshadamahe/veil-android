@@ -218,6 +218,9 @@ app.get("/scrape/stream", async (req, res) => {
   writeSse(res, "init", {
     sources: providers.listSources(),
   });
+  if (typeof res.flush === "function") {
+    res.flush();
+  }
 
   try {
     const result = await runScrape(req.query);

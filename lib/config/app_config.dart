@@ -13,6 +13,24 @@ class AppConfig {
 
   static bool get hasTmdbReadToken => tmdbReadToken.trim().isNotEmpty;
 
+  /// Comma-separated `@p-stream/providers` sourcerer ids (see `id` on each
+  /// scraper). Sent as `sourceOrder` so Oracle tries fast mirrors first.
+  /// Override with `--dart-define=SCRAPE_SOURCE_ORDER=` (empty) to use library default order.
+  static String get scrapeSourceOrder =>
+      const String.fromEnvironment(
+        'SCRAPE_SOURCE_ORDER',
+        defaultValue: 'vidlink,autoembed,insertunit',
+      );
+
+  static List<String>? get scrapeSourceOrderList {
+    final List<String> ids = scrapeSourceOrder
+        .split(',')
+        .map((String s) => s.trim())
+        .where((String s) => s.isNotEmpty)
+        .toList();
+    return ids.isEmpty ? null : ids;
+  }
+
   /// Wyzie Subs API key — https://sub.wyzie.io/redeem (never commit; use `--dart-define`).
   static String get wyzieApiKey =>
       const String.fromEnvironment('WYZIE_API_KEY', defaultValue: '');

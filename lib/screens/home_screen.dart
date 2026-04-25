@@ -59,12 +59,32 @@ class HomeScreen extends ConsumerWidget {
             children: <Widget>[
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: AppSpacing.x4),
-                child: Text(
-                  'Veil',
-                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                    color: AppColors.typeEmphasis,
-                    fontWeight: FontWeight.w700,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      'Veil',
+                      style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                        color: AppColors.typeEmphasis,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.5,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.x2),
+                    Container(
+                      height: AppSpacing.x1,
+                      width: AppSpacing.x10,
+                      decoration: const BoxDecoration(
+                        borderRadius: BorderRadius.all(Radius.circular(2)),
+                        gradient: LinearGradient(
+                          colors: <Color>[
+                            AppColors.purpleC300,
+                            AppColors.purpleC100,
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(height: AppSpacing.x5),
