@@ -12,61 +12,63 @@ import 'package:pstream_android/widgets/adaptive_nav.dart';
 
 final GoRouter appRouter = GoRouter(
   routes: <RouteBase>[
-    ShellRoute(
-      builder: (BuildContext context, GoRouterState state, Widget child) {
-        final int currentIndex = switch (state.uri.path) {
-          '/' => 0,
-          '/search' => 1,
-          '/history' => 2,
-          '/settings' => 3,
-          _ => 0,
-        };
-
+    StatefulShellRoute.indexedStack(
+      builder: (
+        BuildContext context,
+        GoRouterState state,
+        StatefulNavigationShell navigationShell,
+      ) {
         return AdaptiveNav(
-          currentIndex: currentIndex,
+          currentIndex: navigationShell.currentIndex,
           onDestinationSelected: (int index) {
-            switch (index) {
-              case 0:
-                context.go('/');
-                return;
-              case 1:
-                context.go('/search');
-                return;
-              case 2:
-                context.go('/history');
-                return;
-              case 3:
-                context.go('/settings');
-                return;
-            }
+            navigationShell.goBranch(
+              index,
+              initialLocation: index == navigationShell.currentIndex,
+            );
           },
-          child: child,
+          child: navigationShell,
         );
       },
-      routes: <RouteBase>[
-        GoRoute(
-          path: '/',
-          builder: (BuildContext context, GoRouterState state) {
-            return const HomeScreen();
-          },
+      branches: <StatefulShellBranch>[
+        StatefulShellBranch(
+          routes: <RouteBase>[
+            GoRoute(
+              path: '/',
+              builder: (BuildContext context, GoRouterState state) {
+                return const HomeScreen();
+              },
+            ),
+          ],
         ),
-        GoRoute(
-          path: '/search',
-          builder: (BuildContext context, GoRouterState state) {
-            return const SearchScreen();
-          },
+        StatefulShellBranch(
+          routes: <RouteBase>[
+            GoRoute(
+              path: '/search',
+              builder: (BuildContext context, GoRouterState state) {
+                return const SearchScreen();
+              },
+            ),
+          ],
         ),
-        GoRoute(
-          path: '/history',
-          builder: (BuildContext context, GoRouterState state) {
-            return const HistoryScreen();
-          },
+        StatefulShellBranch(
+          routes: <RouteBase>[
+            GoRoute(
+              path: '/history',
+              builder: (BuildContext context, GoRouterState state) {
+                return const HistoryScreen();
+              },
+            ),
+          ],
         ),
-        GoRoute(
-          path: '/settings',
-          builder: (BuildContext context, GoRouterState state) {
-            return const SettingsScreen();
-          },
+        StatefulShellBranch(
+          routes: <RouteBase>[
+            GoRoute(
+              path: '/settings',
+              builder: (BuildContext context, GoRouterState state) {
+                return const SettingsScreen();
+              },
+            ),
+          ],
         ),
       ],
     ),

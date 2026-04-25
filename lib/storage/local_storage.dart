@@ -8,6 +8,7 @@ class LocalStorage {
   static const String _bookmarksBoxName = 'bookmarks';
   static const String _progressBoxName = 'progress';
   static const String _watchHistoryBoxName = 'watch_history';
+  static const double _historyRatioThreshold = 0.03;
 
   static Future<void> init() async {
     await Hive.initFlutter();
@@ -39,7 +40,7 @@ class LocalStorage {
 
     await _progressBox.put(mediaKey, progressEntry);
 
-    if (durationSecs > 0 && watchedRatio > AppConfig.watchedRatio) {
+    if (durationSecs > 0 && watchedRatio >= _historyRatioThreshold) {
       await _watchHistoryBox.put(mediaKey, <String, dynamic>{
         'mediaKey': mediaKey,
         'watchedAt': now.toIso8601String(),
