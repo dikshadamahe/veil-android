@@ -10,10 +10,19 @@ import 'package:pstream_android/providers/tmdb_provider.dart';
 import 'package:shimmer/shimmer.dart';
 
 class EpisodeSelection {
-  const EpisodeSelection({required this.season, required this.episode});
+  const EpisodeSelection({
+    required this.season,
+    required this.episode,
+    this.seasonTmdbId,
+    this.episodeTmdbId,
+    this.seasonTitle,
+  });
 
   final int season;
   final int episode;
+  final String? seasonTmdbId;
+  final String? episodeTmdbId;
+  final String? seasonTitle;
 }
 
 class EpisodeListSheet extends ConsumerStatefulWidget {
@@ -84,7 +93,8 @@ class _EpisodeListSheetState extends ConsumerState<EpisodeListSheet>
       );
     }
 
-    final int seasonNumber = widget.media.seasons[_tabController!.index].number;
+    final Season activeSeason = widget.media.seasons[_tabController!.index];
+    final int seasonNumber = activeSeason.number;
     final AsyncValue<List<Episode>> seasonEpisodes = ref.watch(
       seasonEpisodesProvider(
         SeasonEpisodesRequest(
@@ -182,6 +192,14 @@ class _EpisodeListSheetState extends ConsumerState<EpisodeListSheet>
                                 EpisodeSelection(
                                   season: seasonNumber,
                                   episode: episode.number,
+                                  seasonTmdbId:
+                                      activeSeason.id.trim().isNotEmpty
+                                          ? activeSeason.id.trim()
+                                          : null,
+                                  episodeTmdbId: episode.id.trim().isNotEmpty
+                                      ? episode.id.trim()
+                                      : null,
+                                  seasonTitle: activeSeason.title,
                                 ),
                               );
                             },

@@ -14,6 +14,9 @@ class StreamService {
     MediaItem mediaItem, {
     int? season,
     int? episode,
+    String? seasonTmdbId,
+    String? episodeTmdbId,
+    String? seasonTitle,
   }) {
     return Stream<ScrapeEvent>.multi((multi) async {
       final http.Client client = http.Client();
@@ -58,6 +61,9 @@ class StreamService {
           mediaItem,
           season: season,
           episode: episode,
+          seasonTmdbId: seasonTmdbId,
+          episodeTmdbId: episodeTmdbId,
+          seasonTitle: seasonTitle,
         );
       }
 
@@ -69,6 +75,9 @@ class StreamService {
             mediaItem,
             season: season,
             episode: episode,
+            seasonTmdbId: seasonTmdbId,
+            episodeTmdbId: episodeTmdbId,
+            seasonTitle: seasonTitle,
           ),
         );
 
@@ -182,11 +191,17 @@ class StreamService {
     MediaItem mediaItem, {
     int? season,
     int? episode,
+    String? seasonTmdbId,
+    String? episodeTmdbId,
+    String? seasonTitle,
   }) {
     return _scrapeBlockingRequest(
       mediaItem,
       season: season,
       episode: episode,
+      seasonTmdbId: seasonTmdbId,
+      episodeTmdbId: episodeTmdbId,
+      seasonTitle: seasonTitle,
     );
   }
 
@@ -195,11 +210,17 @@ class StreamService {
     required String sourceId,
     int? season,
     int? episode,
+    String? seasonTmdbId,
+    String? episodeTmdbId,
+    String? seasonTitle,
   }) {
     return _scrapeBlockingRequest(
       mediaItem,
       season: season,
       episode: episode,
+      seasonTmdbId: seasonTmdbId,
+      episodeTmdbId: episodeTmdbId,
+      seasonTitle: seasonTitle,
       sourceOrder: <String>[sourceId],
     );
   }
@@ -236,6 +257,9 @@ class StreamService {
     MediaItem mediaItem, {
     int? season,
     int? episode,
+    String? seasonTmdbId,
+    String? episodeTmdbId,
+    String? seasonTitle,
   }) async {
     final ScrapeCatalog catalog = await fetchCatalog();
     if (catalog.sources.isNotEmpty) {
@@ -246,6 +270,9 @@ class StreamService {
       mediaItem,
       season: season,
       episode: episode,
+      seasonTmdbId: seasonTmdbId,
+      episodeTmdbId: episodeTmdbId,
+      seasonTitle: seasonTitle,
     );
 
     multi.add(
@@ -263,6 +290,9 @@ class StreamService {
     MediaItem mediaItem, {
     int? season,
     int? episode,
+    String? seasonTmdbId,
+    String? episodeTmdbId,
+    String? seasonTitle,
     List<String>? sourceOrder,
   }) async {
     final http.Client client = http.Client();
@@ -274,6 +304,9 @@ class StreamService {
               mediaItem,
               season: season,
               episode: episode,
+              seasonTmdbId: seasonTmdbId,
+              episodeTmdbId: episodeTmdbId,
+              seasonTitle: seasonTitle,
               sourceOrder: sourceOrder,
             ),
           )
@@ -306,6 +339,9 @@ class StreamService {
     MediaItem mediaItem, {
     int? season,
     int? episode,
+    String? seasonTmdbId,
+    String? episodeTmdbId,
+    String? seasonTitle,
     List<String>? sourceOrder,
   }) {
     final Uri base = _baseUri(path);
@@ -314,6 +350,9 @@ class StreamService {
         season: season,
         episode: episode,
         sourceOrder: sourceOrder,
+        seasonTmdbId: seasonTmdbId,
+        episodeTmdbId: episodeTmdbId,
+        seasonTitle: seasonTitle,
       ),
     );
   }

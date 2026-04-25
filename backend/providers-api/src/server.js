@@ -18,6 +18,26 @@ function parsePositiveInt(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function parseNonEmptyString(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const text = String(value).trim();
+  return text.length > 0 ? text : undefined;
+}
+
+function normalizeImdbId(value) {
+  const raw = parseNonEmptyString(value);
+  if (!raw) {
+    return undefined;
+  }
+  return raw.startsWith("tt") ? raw : `tt${raw.replace(/^tt/i, "")}`;
+}
+
+/**
+ * @p-stream/providers expects ShowMedia: nested season/episode with numeric
+ * `number` fields. Flat query strings used to break all TV scrapers.
+ */
 function buildMediaFromQuery(query) {
   const type = query.type === "tv" ? "show" : query.type;
   const tmdbId = parsePositiveInt(query.tmdbId);
@@ -25,6 +45,7 @@ function buildMediaFromQuery(query) {
   const season = parsePositiveInt(query.season);
   const episode = parsePositiveInt(query.episode);
   const title = typeof query.title === "string" ? query.title.trim() : "";
+  const imdbId = normalizeImdbId(query.imdbId);
 
   if (type !== "movie" && type !== "show") {
     return { error: "Query parameter 'type' must be 'movie' or 'show'." };
@@ -42,14 +63,54 @@ function buildMediaFromQuery(query) {
     return { error: "TV scraping requires both 'season' and 'episode' when either is provided." };
   }
 
+  if (type === "movie") {
+    return {
+      media: {
+        type: "movie",
+        tmdbId: String(tmdbId),
+        title,
+        ...(year ? { releaseYear: year } : {}),
+        ...(imdbId ? { imdbId } : {}),
+      },
+    };
+  }
+
+  if (season && episode) {
+    const seasonTmdbId =
+      parseNonEmptyString(query.seasonTmdbId) || `${tmdbId}-s${season}`;
+    const episodeTmdbId =
+      parseNonEmptyString(query.episodeTmdbId) ||
+      `${tmdbId}-s${season}-e${episode}`;
+    const seasonTitle =
+      parseNonEmptyString(query.seasonTitle) || `Season ${season}`;
+
+    return {
+      media: {
+        type: "show",
+        tmdbId: String(tmdbId),
+        title,
+        ...(year ? { releaseYear: year } : {}),
+        ...(imdbId ? { imdbId } : {}),
+        season: {
+          number: season,
+          tmdbId: seasonTmdbId,
+          title: seasonTitle,
+        },
+        episode: {
+          number: episode,
+          tmdbId: episodeTmdbId,
+        },
+      },
+    };
+  }
+
   return {
     media: {
-      type,
+      type: "show",
       tmdbId: String(tmdbId),
       title,
       ...(year ? { releaseYear: year } : {}),
-      ...(season ? { season: String(season) } : {}),
-      ...(episode ? { episode: String(episode) } : {}),
+      ...(imdbId ? { imdbId } : {}),
     },
   };
 }

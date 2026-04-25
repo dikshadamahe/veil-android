@@ -22,6 +22,10 @@ jobs:
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
       ORACLE_URL: ${{ vars.ORACLE_URL || secrets.ORACLE_URL }}
       TMDB_TOKEN: ${{ secrets.TMDB_TOKEN || secrets.TMDB_READ_TOKEN || vars.TMDB_TOKEN || vars.TMDB_READ_TOKEN }}
+      WYZIE_API_KEY: ${{ secrets.WYZIE_API_KEY }}
+      OPENSUBTITLES_API_KEY: ${{ secrets.OPENSUBTITLES_API_KEY }}
+      OPENSUBTITLES_USERNAME: ${{ secrets.OPENSUBTITLES_USERNAME }}
+      OPENSUBTITLES_PASSWORD: ${{ secrets.OPENSUBTITLES_PASSWORD }}
 
     steps:
       - name: Checkout release ref
@@ -65,6 +69,18 @@ jobs:
 
           if [ -n "${ORACLE_URL}" ]; then
             BUILD_ARGS+=("--dart-define=ORACLE_URL=${ORACLE_URL}")
+          fi
+          if [ -n "${WYZIE_API_KEY}" ]; then
+            BUILD_ARGS+=("--dart-define=WYZIE_API_KEY=${WYZIE_API_KEY}")
+          fi
+          if [ -n "${OPENSUBTITLES_API_KEY}" ]; then
+            BUILD_ARGS+=("--dart-define=OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY}")
+          fi
+          if [ -n "${OPENSUBTITLES_USERNAME}" ]; then
+            BUILD_ARGS+=("--dart-define=OPENSUBTITLES_USERNAME=${OPENSUBTITLES_USERNAME}")
+          fi
+          if [ -n "${OPENSUBTITLES_PASSWORD}" ]; then
+            BUILD_ARGS+=("--dart-define=OPENSUBTITLES_PASSWORD=${OPENSUBTITLES_PASSWORD}")
           fi
 
           flutter "${BUILD_ARGS[@]}"

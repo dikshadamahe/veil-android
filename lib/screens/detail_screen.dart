@@ -34,6 +34,9 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
   Future<void> _handlePlay(MediaItem media) async {
     int? selectedSeason;
     int? selectedEpisode;
+    String? scrapeSeasonTmdbId;
+    String? scrapeEpisodeTmdbId;
+    String? scrapeSeasonTitle;
 
     if (media.isShow) {
       if (media.seasons.isEmpty) {
@@ -61,6 +64,9 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
 
       selectedSeason = selection.season;
       selectedEpisode = selection.episode;
+      scrapeSeasonTmdbId = selection.seasonTmdbId;
+      scrapeEpisodeTmdbId = selection.episodeTmdbId;
+      scrapeSeasonTitle = selection.seasonTitle;
     }
 
     final progressRequest = ProgressRequest(
@@ -85,6 +91,9 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         mediaItem: media,
         season: selectedSeason,
         episode: selectedEpisode,
+        seasonTmdbId: scrapeSeasonTmdbId,
+        episodeTmdbId: scrapeEpisodeTmdbId,
+        seasonTitle: scrapeSeasonTitle,
         resumeFrom: resumeFrom,
       ),
     );

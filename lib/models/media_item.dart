@@ -98,7 +98,11 @@ class MediaItem {
     int? season,
     int? episode,
     List<String>? sourceOrder,
+    String? seasonTmdbId,
+    String? episodeTmdbId,
+    String? seasonTitle,
   }) {
+    final String? imdb = _scrapeImdbQueryValue(imdbId);
     return <String, String>{
       'type': isShow ? 'tv' : 'movie',
       'tmdbId': '$tmdbId',
@@ -106,9 +110,27 @@ class MediaItem {
       if (year > 0) 'year': '$year',
       if (season != null) 'season': '$season',
       if (episode != null) 'episode': '$episode',
+      if (imdb != null) 'imdbId': imdb,
+      if (seasonTmdbId != null && seasonTmdbId.trim().isNotEmpty)
+        'seasonTmdbId': seasonTmdbId.trim(),
+      if (episodeTmdbId != null && episodeTmdbId.trim().isNotEmpty)
+        'episodeTmdbId': episodeTmdbId.trim(),
+      if (seasonTitle != null && seasonTitle.trim().isNotEmpty)
+        'seasonTitle': seasonTitle.trim(),
       if (sourceOrder != null && sourceOrder.isNotEmpty)
         'sourceOrder': sourceOrder.join(','),
     };
+  }
+
+  static String? _scrapeImdbQueryValue(String? raw) {
+    if (raw == null) {
+      return null;
+    }
+    final String trimmed = raw.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    return trimmed.startsWith('tt') ? trimmed : 'tt$trimmed';
   }
 
   static String _parseType(Map<String, dynamic> json) {

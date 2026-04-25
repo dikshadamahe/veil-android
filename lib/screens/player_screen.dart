@@ -6,7 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/config/app_theme.dart';
+import 'package:pstream_android/models/external_subtitle_offer.dart';
 import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/models/episode.dart';
 import 'package:pstream_android/models/season.dart';
@@ -15,6 +17,7 @@ import 'package:pstream_android/models/stream_result.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/screens/scraping_screen.dart';
+import 'package:pstream_android/services/external_subtitle_service.dart';
 import 'package:pstream_android/services/stream_service.dart';
 import 'package:pstream_android/utils/player_native_tune.dart';
 import 'package:pstream_android/widgets/player_controls.dart';
@@ -28,6 +31,9 @@ class PlayerScreenArgs {
     required this.streamResult,
     this.season,
     this.episode,
+    this.seasonTmdbId,
+    this.episodeTmdbId,
+    this.seasonTitle,
     this.resumeFrom,
   });
 
@@ -35,6 +41,9 @@ class PlayerScreenArgs {
   final StreamResult streamResult;
   final int? season;
   final int? episode;
+  final String? seasonTmdbId;
+  final String? episodeTmdbId;
+  final String? seasonTitle;
   final int? resumeFrom;
 }
 
@@ -600,6 +609,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     _enableAutoSubtitles();
                   },
                 ),
+                if (AppConfig.hasWyzieApiKey || AppConfig.hasOpensubtitlesApiKey)
+                  _PlayerOptionRow(
+                    title: 'Search online…',
+                    subtitle: 'Wyzie & OpenSubtitles',
+                    selected: false,
+                    showChevron: true,
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      unawaited(_openOnlineSubtitlesPicker());
+                    },
+                  ),
                 for (final MapEntry<String, List<StreamCaption>> entry
                     in groupedCaptions.entries)
                   _PlayerOptionRow(
@@ -659,6 +679,97 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
+  Future<void> _openOnlineSubtitlesPicker() async {
+    _showControls();
+    if (!AppConfig.hasWyzieApiKey && !AppConfig.hasOpensubtitlesApiKey) {
+      _setSubtitleState(
+        enabled: _subtitlesEnabled,
+        message: 'Add WYZIE_API_KEY or OPENSUBTITLES_API_KEY to your build',
+      );
+      return;
+    }
+
+    if (widget.args.mediaItem.isShow &&
+        (widget.args.season == null || widget.args.episode == null)) {
+      _setSubtitleState(
+        enabled: _subtitlesEnabled,
+        message: 'Episode context required for online subtitles',
+      );
+      return;
+    }
+
+    await _showPlayerSheet<void>(
+      builder: (BuildContext context) {
+        return _PlayerSheetScaffold(
+          child: _OnlineSubtitleSearchSheet(
+            mediaItem: widget.args.mediaItem,
+            season: widget.args.season,
+            episode: widget.args.episode,
+            onBack: () => Navigator.of(context).pop(),
+            onPick: (ExternalSubtitleOffer offer) async {
+              Navigator.of(context).pop();
+              await _applyExternalSubtitleOffer(offer);
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _applyExternalSubtitleOffer(ExternalSubtitleOffer offer) async {
+    if (!mounted) {
+      return;
+    }
+
+    try {
+      String? url = offer.directUrl;
+      if (offer.opensubtitlesFileId != null) {
+        const ExternalSubtitleService service = ExternalSubtitleService();
+        url ??= await service.resolveOpensubtitlesDownloadUrl(
+          offer.opensubtitlesFileId!,
+        );
+      }
+
+      if (url == null || url.isEmpty) {
+        if (!mounted) {
+          return;
+        }
+        _setSubtitleState(
+          enabled: _subtitlesEnabled,
+          message:
+              'Could not open subtitle (try OPENSUBTITLES_USERNAME/PASSWORD for OpenSubtitles)',
+        );
+        return;
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      _selectedCaption = null;
+      _subtitlesEnabled = true;
+      await _player.setSubtitleTrack(
+        SubtitleTrack.uri(
+          url,
+          title: offer.title,
+          language: offer.languageLabel,
+        ),
+      );
+      _setSubtitleState(
+        enabled: true,
+        message: offer.providerLabel,
+      );
+      _showControls();
+    } catch (_) {
+      if (mounted) {
+        _setSubtitleState(
+          enabled: _subtitlesEnabled,
+          message: 'Subtitle failed',
+        );
+      }
+    }
+  }
+
   Future<void> _switchSource(String sourceId) async {
     if (!mounted) {
       return;
@@ -676,6 +787,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         sourceId: sourceId,
         season: widget.args.season,
         episode: widget.args.episode,
+        seasonTmdbId: widget.args.seasonTmdbId,
+        episodeTmdbId: widget.args.episodeTmdbId,
+        seasonTitle: widget.args.seasonTitle,
       );
 
       if (!mounted) {
@@ -702,6 +816,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               streamResult: result,
               season: widget.args.season,
               episode: widget.args.episode,
+              seasonTmdbId: widget.args.seasonTmdbId,
+              episodeTmdbId: widget.args.episodeTmdbId,
+              seasonTitle: widget.args.seasonTitle,
               resumeFrom: _position.inSeconds,
             ),
           ),
@@ -1921,6 +2038,136 @@ class _PlayerOptionRow extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _OnlineSubtitleSearchSheet extends StatefulWidget {
+  const _OnlineSubtitleSearchSheet({
+    required this.mediaItem,
+    required this.season,
+    required this.episode,
+    required this.onBack,
+    required this.onPick,
+  });
+
+  final MediaItem mediaItem;
+  final int? season;
+  final int? episode;
+  final VoidCallback onBack;
+  final Future<void> Function(ExternalSubtitleOffer offer) onPick;
+
+  @override
+  State<_OnlineSubtitleSearchSheet> createState() =>
+      _OnlineSubtitleSearchSheetState();
+}
+
+class _OnlineSubtitleSearchSheetState extends State<_OnlineSubtitleSearchSheet> {
+  late Future<List<ExternalSubtitleOffer>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _loadOffers();
+  }
+
+  Future<List<ExternalSubtitleOffer>> _loadOffers() {
+    return const ExternalSubtitleService().searchOnline(
+      media: widget.mediaItem,
+      season: widget.season,
+      episode: widget.episode,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _PlayerOptionSheet(
+      title: 'Online subtitles',
+      trailingIcon: Icons.sync_alt_rounded,
+      onBack: widget.onBack,
+      onTrailingTap: () {
+        setState(() {
+          _future = _loadOffers();
+        });
+      },
+      child: FutureBuilder<List<ExternalSubtitleOffer>>(
+        future: _future,
+        builder: (
+          BuildContext context,
+          AsyncSnapshot<List<ExternalSubtitleOffer>> snapshot,
+        ) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(
+              child: Padding(
+                padding: EdgeInsets.all(AppSpacing.x8),
+                child: CircularProgressIndicator(),
+              ),
+            );
+          }
+          if (snapshot.hasError) {
+            return Padding(
+              padding: const EdgeInsets.all(AppSpacing.x5),
+              child: Text(
+                '${snapshot.error}',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppColors.typeText,
+                    ),
+              ),
+            );
+          }
+          final List<ExternalSubtitleOffer> offers =
+              snapshot.data ?? const <ExternalSubtitleOffer>[];
+          if (offers.isEmpty) {
+            return Padding(
+              padding: const EdgeInsets.all(AppSpacing.x5),
+              child: Text(
+                'No online subtitles found. Check keys or try another episode.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppColors.typeText,
+                    ),
+              ),
+            );
+          }
+          return ListView.separated(
+            padding: const EdgeInsets.only(bottom: AppSpacing.x4),
+            itemCount: offers.length,
+            separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.x2),
+            itemBuilder: (BuildContext context, int index) {
+              final ExternalSubtitleOffer offer = offers[index];
+              return Material(
+                color: AppColors.dropdownAltBackground,
+                borderRadius: BorderRadius.circular(AppSpacing.x4),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(AppSpacing.x4),
+                  onTap: () => widget.onPick(offer),
+                  child: Padding(
+                    padding: const EdgeInsets.all(AppSpacing.x4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          offer.title,
+                          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                color: AppColors.typeEmphasis,
+                                fontWeight: FontWeight.w600,
+                              ),
+                        ),
+                        const SizedBox(height: AppSpacing.x2),
+                        Text(
+                          '${offer.languageLabel} · ${offer.providerLabel}',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: AppColors.typeSecondary,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
       ),
     );
   }

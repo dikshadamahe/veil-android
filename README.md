@@ -111,6 +111,10 @@ The app reads **runtime** configuration (no secrets in source):
 |--------|---------|
 | `ORACLE_URL` | Base URL of **providers-api** (e.g. `http://YOUR_VM_IP:3001`) |
 | `TMDB_TOKEN` | TMDB **read** access token |
+| `WYZIE_API_KEY` | Optional — [Wyzie Subs](https://sub.wyzie.io/redeem) key for **Search online…** subtitles in the player |
+| `OPENSUBTITLES_API_KEY` | Optional — [OpenSubtitles.com](https://www.opensubtitles.com/en/consumers) REST **Api-Key** (search + download) |
+| `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` | Optional — OpenSubtitles **account**; improves `/download` success when API key alone is not enough |
+| `SUBTITLE_HTTP_USER_AGENT` | Optional override for subtitle HTTP requests (default `Veil 1.0.0`) |
 
 **Release APK example:**
 
@@ -118,8 +122,12 @@ The app reads **runtime** configuration (no secrets in source):
 flutter pub get
 flutter build apk --release \
   --dart-define=ORACLE_URL=http://YOUR_VM_IP:3001 \
-  --dart-define=TMDB_TOKEN=YOUR_TMDB_READ_ACCESS_TOKEN
+  --dart-define=TMDB_TOKEN=YOUR_TMDB_READ_ACCESS_TOKEN \
+  --dart-define=WYZIE_API_KEY=YOUR_WYZIE_KEY \
+  --dart-define=OPENSUBTITLES_API_KEY=YOUR_OS_API_KEY
 ```
+
+Store subtitle keys in **GitHub Actions secrets** (or local env only); do not commit them. Release workflow passes them through when `WYZIE_API_KEY` / `OPENSUBTITLES_*` secrets are set.
 
 Use **HTTPS** in production when your infrastructure supports it; cleartext is only appropriate for controlled lab/VPN setups.
 

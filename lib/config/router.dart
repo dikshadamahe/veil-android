@@ -92,6 +92,9 @@ final GoRouter appRouter = GoRouter(
           mediaItem: args.mediaItem,
           season: args.season,
           episode: args.episode,
+          seasonTmdbId: args.seasonTmdbId,
+          episodeTmdbId: args.episodeTmdbId,
+          seasonTitle: args.seasonTitle,
           resumeFrom: args.resumeFrom,
         );
       },

@@ -17,12 +17,18 @@ class ScrapingScreenArgs {
     required this.mediaItem,
     this.season,
     this.episode,
+    this.seasonTmdbId,
+    this.episodeTmdbId,
+    this.seasonTitle,
     this.resumeFrom,
   });
 
   final MediaItem mediaItem;
   final int? season;
   final int? episode;
+  final String? seasonTmdbId;
+  final String? episodeTmdbId;
+  final String? seasonTitle;
   final int? resumeFrom;
 }
 
@@ -32,12 +38,18 @@ class ScrapingScreen extends ConsumerStatefulWidget {
     required this.mediaItem,
     this.season,
     this.episode,
+    this.seasonTmdbId,
+    this.episodeTmdbId,
+    this.seasonTitle,
     this.resumeFrom,
   });
 
   final MediaItem mediaItem;
   final int? season;
   final int? episode;
+  final String? seasonTmdbId;
+  final String? episodeTmdbId;
+  final String? seasonTitle;
   final int? resumeFrom;
 
   @override
@@ -103,6 +115,9 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
           widget.mediaItem,
           season: widget.season,
           episode: widget.episode,
+          seasonTmdbId: widget.seasonTmdbId,
+          episodeTmdbId: widget.episodeTmdbId,
+          seasonTitle: widget.seasonTitle,
         )
         .listen(
       _handleEvent,
@@ -338,6 +353,9 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
         sourceId: sourceId,
         season: widget.season,
         episode: widget.episode,
+        seasonTmdbId: widget.seasonTmdbId,
+        episodeTmdbId: widget.episodeTmdbId,
+        seasonTitle: widget.seasonTitle,
       );
 
       if (!mounted) {
@@ -388,6 +406,9 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
         streamResult: result,
         season: widget.season,
         episode: widget.episode,
+        seasonTmdbId: widget.seasonTmdbId,
+        episodeTmdbId: widget.episodeTmdbId,
+        seasonTitle: widget.seasonTitle,
         resumeFrom: widget.resumeFrom,
       ),
     );
