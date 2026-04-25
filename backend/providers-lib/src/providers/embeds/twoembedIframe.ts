@@ -1,6 +1,6 @@
 import { flags } from '@/entrypoint/utils/targets';
 import { makeEmbed } from '@/providers/base';
-import { pullM3U8FromEmbedPage } from '@/providers/utils/m3u8FromEmbedPage';
+import { pullM3u8FromEmbedPage } from '@/providers/utils/m3u8FromEmbedPage';
 import { createM3U8ProxyUrl } from '@/utils/proxy';
 
 const REF = 'https://www.2embed.cc/';
