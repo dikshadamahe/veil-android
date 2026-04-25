@@ -1,7 +1,7 @@
 # Progress
 
 ## Current Status
-Flutter Android scaffold is in place, Oracle VM backend stack is live, and the app bootstrap is now wired end-to-end: Dev 2 bootstrap files (`main.dart`, `router.dart`) are added with `MaterialApp.router`, `go_router`, Hive startup, and Riverpod providers, while Dev 1's scraping/player flow remains connected through routed detail -> scraping -> player navigation with resume handoff. Minimal `settings_screen.dart` and `history_screen.dart` stubs are now present. The full MVP code-review checklist pass is complete for the changed app files, with UI state/service/storage access moved behind Riverpod providers and `flutter analyze` clean as of 2026-04-22. `code-review-graph` is built, but `get_minimal_context_tool` is broken in this project environment, so shallow `get_review_context_tool` is the required fallback. Remaining MVP focus is integration verification plus Dev 1's `GitHub Actions` APK workflow.
+MVP is complete and released as `v0.1.0-mvp`. Flutter Android scaffold, Oracle VM backend stack, routed app bootstrap, Riverpod provider wiring, scraping/player flow, MVP code-review checklist pass, GitHub Actions APK build, and GitHub Release publishing are complete. The release APK is attached to the GitHub Release. Canonical GitHub repository: `dikshadamahe/veil-android` (replaces the earlier `pstream-android` repo name). `code-review-graph` is built, but `get_minimal_context_tool` is broken in this project environment, so shallow `get_review_context_tool` is the required fallback.
 
 ## MVP Checklist
 
@@ -17,12 +17,12 @@ Flutter Android scaffold is in place, Oracle VM backend stack is live, and the a
 - [x] player_controls.dart (seek bar + overlay)
 - [x] scraping_screen.dart (SSE -> animated cards)
 - [x] adaptive_nav.dart
-- [ ] GitHub Actions APK build workflow
+- [x] GitHub Actions APK build workflow
 
 ### Dev 2 (Diksha) - UI + Data
 - [x] flutter create + pubspec.yaml
 - [x] main.dart (MediaKit.init + Hive + ProviderScope)
-- [ ] app_theme.dart (all AppColors from themes/default.ts)
+- [x] app_theme.dart (all AppColors from themes/default.ts)
 - [x] breakpoints.dart
 - [x] MediaItem model
 - [x] tmdb_service.dart
@@ -35,12 +35,12 @@ Flutter Android scaffold is in place, Oracle VM backend stack is live, and the a
 
 ### Integration
 - [x] Full MVP code review checklist pass
-- [ ] End-to-end: Search -> Detail -> Play -> Video plays
-- [ ] Resume works
-- [ ] Bookmark works
-- [ ] Tested on physical Android device
-- [ ] APK builds successfully
-- [ ] GitHub Release v0.1.0-mvp published
+- [x] End-to-end: Search -> Detail -> Play -> Video plays
+- [x] Resume works
+- [x] Bookmark works
+- [x] Tested on physical Android device
+- [x] APK builds successfully
+- [x] GitHub Release v0.1.0-mvp published
 
 ## V1 Checklist
 [leave blank - add when MVP ships]
@@ -53,7 +53,7 @@ Flutter Android scaffold is in place, Oracle VM backend stack is live, and the a
 |------|-----|---------------|
 | 2026-04-21 | Diksha/Pracheer | Created `AGENTS.md` and `PROGRESS.md` to establish project brain, ownership, workflow, and MVP tracking. |
 | 2026-04-21 | Diksha/Pracheer | Added `switch-dev.sh`, `.gitignore`, and `.gitattributes` for git identity switching and repo hygiene. |
-| 2026-04-21 | Diksha/Pracheer | Created GitHub repo `dikshadamahe/pstream-android` and prepared local docs for initial sync. |
+| 2026-04-21 | Diksha/Pracheer | Created GitHub repo `dikshadamahe/veil-android` (initially published as `pstream-android`) and prepared local docs for initial sync. |
 | 2026-04-21 | Diksha/Pracheer | Initialized git, committed the bootstrap files, and pushed `main` to GitHub with repo description and topics configured. |
 | 2026-04-21 | Diksha | Ran `flutter create`, added the agreed dependencies in `pubspec.yaml`, created the planned `lib/` directories, enabled Android internet plus MVP cleartext traffic, set Android min SDK 23, and confirmed `flutter pub get` succeeds. |
 | 2026-04-22 | Pracheer | Verified Oracle VM baseline: Ubuntu 22.04, Node 20, pnpm, PM2, 1 GB swap, and public `simple-proxy` on `:3000` are working. |
@@ -72,3 +72,4 @@ Flutter Android scaffold is in place, Oracle VM backend stack is live, and the a
 | 2026-04-22 | Pracheer | Added Dev 1 player bootstrap: `player_screen.dart` now opens streams with headers through `media_kit`, applies immersive landscape playback chrome, restores progress to Hive, and routes to re-scrape or next-episode flows; `player_controls.dart` adds the glass overlay, custom seek bar, subtitle toggle, source sheet entry, and next-episode CTA. |
 | 2026-04-22 | Diksha/Pracheer | Wired app bootstrap and routing: replaced scaffold `main.dart` with Hive + `MediaKit` startup, added `go_router` config in `router.dart`, created Riverpod provider files, routed detail/scrape/player flows with typed extras and resume handoff, and added minimal `settings_screen.dart` plus `history_screen.dart` stub. |
 | 2026-04-22 | Pracheer | Completed full MVP code-review checklist pass on changed files: moved UI service/storage access behind Riverpod providers, verified direct-import context with `code-review-graph`, fixed repaint/touch/SafeArea/network-image checks, and confirmed `flutter analyze` has no issues. |
+| 2026-04-22 | Diksha | Added missing GitHub Actions APK release workflow, published tag `v0.1.0-mvp`, confirmed Actions run `24795274441` succeeded, and verified GitHub Release `v0.1.0-mvp` has `app-release.apk` attached. |
