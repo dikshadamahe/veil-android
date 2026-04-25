@@ -45,7 +45,12 @@ final GoRouter appRouter = GoRouter(
             GoRoute(
               path: '/search',
               builder: (BuildContext context, GoRouterState state) {
-                return const SearchScreen();
+                final SearchScreenArgs? args =
+                    state.extra as SearchScreenArgs?;
+                return SearchScreen(
+                  initialQuery: args?.initialQuery,
+                  title: args?.title,
+                );
               },
             ),
           ],

@@ -8,6 +8,7 @@ import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/tmdb_provider.dart';
 import 'package:pstream_android/screens/scraping_screen.dart';
+import 'package:pstream_android/screens/search_screen.dart';
 import 'package:pstream_android/widgets/episode_list_sheet.dart';
 import 'package:shimmer/shimmer.dart';
 
@@ -35,6 +36,15 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     int? selectedEpisode;
 
     if (media.isShow) {
+      if (media.seasons.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Episode data is not available for this series yet.'),
+          ),
+        );
+        return;
+      }
+
       final EpisodeSelection? selection =
           await showModalBottomSheet<EpisodeSelection>(
             context: context,
@@ -90,6 +100,20 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     }
   }
 
+  void _openCreditSearch(MediaCredit credit) {
+    if (credit.name.trim().isEmpty) {
+      return;
+    }
+
+    context.push(
+      '/search',
+      extra: SearchScreenArgs(
+        initialQuery: credit.name,
+        title: '${credit.name} Credits',
+      ),
+    );
+  }
+
   Future<bool> _showResumeDialogIfNeeded(Map<String, dynamic>? progress) async {
     if (progress == null) {
       return true;
@@ -140,12 +164,18 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     );
     final MediaItem media = details.value ?? widget.mediaItem;
     final bool isLoading = details.isLoading;
+    final Object? loadError = details.hasError ? details.error : null;
     final bool isBookmarked = ref.watch(bookmarkStatusProvider(media));
 
     return Scaffold(
       backgroundColor: AppColors.backgroundMain,
       body: SafeArea(
-        child: CustomScrollView(
+        child: loadError != null
+            ? _DetailErrorState(
+                media: widget.mediaItem,
+                message: '$loadError',
+              )
+            : CustomScrollView(
             slivers: <Widget>[
               SliverAppBar(
                 expandedHeight: heroHeight,
@@ -171,6 +201,7 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
                             });
                           },
                           onPlay: () => _handlePlay(media),
+                          onCreditTap: _openCreditSearch,
                         )
                       : Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -189,6 +220,7 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
                                   });
                                 },
                                 onPlay: () => _handlePlay(media),
+                                onCreditTap: _openCreditSearch,
                               ),
                             ),
                             const SizedBox(width: AppSpacing.x6),
@@ -297,6 +329,7 @@ class _DetailBody extends StatelessWidget {
     required this.onToggleBookmark,
     required this.onToggleOverview,
     required this.onPlay,
+    required this.onCreditTap,
   });
 
   final MediaItem media;
@@ -306,6 +339,7 @@ class _DetailBody extends StatelessWidget {
   final VoidCallback onToggleBookmark;
   final VoidCallback onToggleOverview;
   final VoidCallback onPlay;
+  final void Function(MediaCredit credit) onCreditTap;
 
   @override
   Widget build(BuildContext context) {
@@ -418,27 +452,45 @@ class _DetailBody extends StatelessWidget {
                   padding: const EdgeInsets.only(right: AppSpacing.x3),
                   child: SizedBox(
                     width: AppSpacing.x20,
-                    child: Column(
-                      children: <Widget>[
-                        CircleAvatar(
-                          radius: AppSpacing.x8,
-                          backgroundColor: AppColors.mediaCardHoverBackground,
-                          backgroundImage: credit.profileUrl() != null
-                              ? CachedNetworkImageProvider(credit.profileUrl()!)
-                              : null,
-                          child: credit.profileUrl() == null
-                              ? const Icon(Icons.person_outline_rounded)
-                              : null,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(AppSpacing.x4),
+                      onTap: () => onCreditTap(credit),
+                      child: Padding(
+                        padding: const EdgeInsets.all(AppSpacing.x1),
+                        child: Column(
+                          children: <Widget>[
+                            CircleAvatar(
+                              radius: AppSpacing.x8,
+                              backgroundColor:
+                                  AppColors.mediaCardHoverBackground,
+                              backgroundImage: credit.profileUrl('w92') != null
+                                  ? CachedNetworkImageProvider(
+                                      credit.profileUrl('w92')!,
+                                    )
+                                  : null,
+                              child: credit.profileUrl('w92') == null
+                                  ? const Icon(Icons.person_outline_rounded)
+                                  : null,
+                            ),
+                            const SizedBox(height: AppSpacing.x2),
+                            Text(
+                              credit.name,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context).textTheme.labelMedium,
+                            ),
+                            if ((credit.character ?? '').trim().isNotEmpty)
+                              Text(
+                                credit.character!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                          ],
                         ),
-                        const SizedBox(height: AppSpacing.x2),
-                        Text(
-                          credit.name,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.labelMedium,
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 );
@@ -475,6 +527,53 @@ class _PosterPanel extends StatelessWidget {
                       const _BackdropPlaceholder(),
                 ),
         ),
+      ),
+    );
+  }
+}
+
+class _DetailErrorState extends StatelessWidget {
+  const _DetailErrorState({
+    required this.media,
+    required this.message,
+  });
+
+  final MediaItem media;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.x5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          IconButton(
+            onPressed: () => Navigator.of(context).maybePop(),
+            icon: const Icon(Icons.arrow_back_rounded),
+          ),
+          const SizedBox(height: AppSpacing.x4),
+          _PosterPanel(media: media),
+          const SizedBox(height: AppSpacing.x5),
+          Text(
+            media.title,
+            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                  color: AppColors.typeEmphasis,
+                ),
+          ),
+          const SizedBox(height: AppSpacing.x3),
+          Text(
+            'Could not load this title right now.',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: AppSpacing.x2),
+          Text(
+            message,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: AppColors.typeText,
+                ),
+          ),
+        ],
       ),
     );
   }

@@ -11,9 +11,14 @@ import 'package:pstream_android/screens/detail_screen.dart';
 import 'package:shimmer/shimmer.dart';
 
 class MediaCard extends ConsumerWidget {
-  const MediaCard({super.key, required this.mediaItem});
+  const MediaCard({
+    super.key,
+    required this.mediaItem,
+    this.posterSize = 'w342',
+  });
 
   final MediaItem mediaItem;
+  final String posterSize;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -70,7 +75,9 @@ class MediaCard extends ConsumerWidget {
                             child: mediaItem.posterUrl() == null
                                 ? const _MediaCardPosterPlaceholder()
                                 : CachedNetworkImage(
-                                    imageUrl: mediaItem.posterUrl()!,
+                                    imageUrl: mediaItem.posterUrl(
+                                      posterSize,
+                                    )!,
                                     fit: BoxFit.cover,
                                     placeholder: (_, placeholderUrl) =>
                                         const _MediaCardPosterPlaceholder(),

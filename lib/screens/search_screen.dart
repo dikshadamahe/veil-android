@@ -8,8 +8,25 @@ import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/providers/tmdb_provider.dart';
 import 'package:pstream_android/widgets/media_card.dart';
 
+class SearchScreenArgs {
+  const SearchScreenArgs({
+    this.initialQuery,
+    this.title,
+  });
+
+  final String? initialQuery;
+  final String? title;
+}
+
 class SearchScreen extends ConsumerStatefulWidget {
-  const SearchScreen({super.key});
+  const SearchScreen({
+    super.key,
+    this.initialQuery,
+    this.title,
+  });
+
+  final String? initialQuery;
+  final String? title;
 
   @override
   ConsumerState<SearchScreen> createState() => _SearchScreenState();
@@ -24,8 +41,13 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   @override
   void initState() {
     super.initState();
+    final String initialQuery = widget.initialQuery?.trim() ?? '';
+    if (initialQuery.isNotEmpty) {
+      _controller.text = initialQuery;
+      _query = initialQuery;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
+      if (mounted && initialQuery.isEmpty) {
         _focusNode.requestFocus();
       }
     });
@@ -98,13 +120,15 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
             }
 
             return _SearchResultsGrid(
-              title: hasQuery ? null : 'Trending Suggestions',
+              title: hasQuery
+                  ? widget.title
+                  : 'Trending Suggestions',
               items: items,
               isLoading: false,
             );
           },
           loading: () => _SearchResultsGrid(
-            title: hasQuery ? null : 'Trending Suggestions',
+            title: hasQuery ? widget.title : 'Trending Suggestions',
             items: const <MediaItem>[],
             isLoading: true,
           ),
@@ -178,7 +202,10 @@ class _SearchResultsGrid extends StatelessWidget {
                 return const SizedBox.shrink();
               }
 
-              return MediaCard(mediaItem: items[index]);
+              return MediaCard(
+                mediaItem: items[index],
+                posterSize: 'w185',
+              );
             },
           ),
         ),
