@@ -1,14 +1,15 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/config/app_theme.dart';
 import 'package:pstream_android/models/external_subtitle_offer.dart';
@@ -210,9 +211,139 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return int.tryParse(match.group(1)!);
   }
 
+  /// Map a sidecar caption to the country flag emoji that the web UI shows
+  /// next to each language. We use a tight ISO-639 → ISO-3166 table that
+  /// covers every language code our scrapers emit; falls back to a globe
+  /// glyph for unmapped codes so layout never collapses.
+  static String _flagForLanguage(String? code) {
+    final String? country = _countryForLanguage(code);
+    if (country == null) {
+      return String.fromCharCode(0x1F310); // 🌐
+    }
+    return _flagFromCountry(country);
+  }
+
+  static String _flagFromCountry(String country) {
+    final String upper = country.toUpperCase();
+    if (upper.length != 2) {
+      return String.fromCharCode(0x1F310);
+    }
+    final int a = upper.codeUnitAt(0);
+    final int b = upper.codeUnitAt(1);
+    return String.fromCharCodes(<int>[0x1F1A5 + a, 0x1F1A5 + b]);
+  }
+
+  static String? _countryForLanguage(String? code) {
+    if (code == null || code.trim().isEmpty) {
+      return null;
+    }
+    // Normalise BCP-47 / locale strings: take the lowercase primary tag.
+    final String lower = code.trim().toLowerCase().replaceAll('_', '-');
+    final String primary = lower.split('-').first;
+    const Map<String, String> table = <String, String>{
+      'en': 'US',
+      'es': 'ES',
+      'pt': 'PT',
+      'fr': 'FR',
+      'de': 'DE',
+      'it': 'IT',
+      'nl': 'NL',
+      'sv': 'SE',
+      'no': 'NO',
+      'nb': 'NO',
+      'nn': 'NO',
+      'da': 'DK',
+      'fi': 'FI',
+      'is': 'IS',
+      'pl': 'PL',
+      'cs': 'CZ',
+      'sk': 'SK',
+      'sl': 'SI',
+      'hu': 'HU',
+      'ro': 'RO',
+      'el': 'GR',
+      'tr': 'TR',
+      'ru': 'RU',
+      'uk': 'UA',
+      'bg': 'BG',
+      'sr': 'RS',
+      'hr': 'HR',
+      'mk': 'MK',
+      'sq': 'AL',
+      'he': 'IL',
+      'ar': 'SA',
+      'fa': 'IR',
+      'ur': 'PK',
+      'hi': 'IN',
+      'bn': 'BD',
+      'ta': 'IN',
+      'te': 'IN',
+      'ml': 'IN',
+      'kn': 'IN',
+      'mr': 'IN',
+      'gu': 'IN',
+      'pa': 'IN',
+      'ja': 'JP',
+      'ko': 'KR',
+      'zh': 'CN',
+      'th': 'TH',
+      'vi': 'VN',
+      'id': 'ID',
+      'ms': 'MY',
+      'tl': 'PH',
+      'sw': 'KE',
+      'am': 'ET',
+      'lt': 'LT',
+      'lv': 'LV',
+      'et': 'EE',
+    };
+    return table[primary];
+  }
+
+  /// Detect hearing-impaired captions from common provider markers. Most
+  /// scrapers expose the flag in `raw['hearingImpaired']`, `raw['hi']`,
+  /// or by appending "(SDH)" / "[CC]" to the label.
+  /// Pick the most reliable language code from a group of captions. The
+  /// first non-empty value wins so flags follow the dominant track.
+  static String? _languageCodeFor(List<StreamCaption> captions) {
+    for (final StreamCaption caption in captions) {
+      final String? code = caption.language;
+      if (code != null && code.trim().isNotEmpty) {
+        return code;
+      }
+    }
+    return null;
+  }
+
+  static bool _isHearingImpaired(StreamCaption caption) {
+    final dynamic raw = caption.raw;
+    if (raw is Map) {
+      final dynamic hi = raw['hearingImpaired'] ?? raw['hi'] ?? raw['sdh'];
+      if (hi is bool) {
+        return hi;
+      }
+      if (hi is String) {
+        final String norm = hi.toLowerCase().trim();
+        if (norm == 'true' || norm == 'yes' || norm == '1') {
+          return true;
+        }
+      }
+    }
+    final String haystack =
+        '${caption.label ?? ''} ${caption.type ?? ''}'.toLowerCase();
+    return haystack.contains('sdh') ||
+        haystack.contains('cc') ||
+        haystack.contains('hearing');
+  }
+
   /// Push the user's saved subtitle style (size / text color / background
   /// opacity) into the native libmpv player. Called both right after a
   /// stream opens and again whenever the Customize sheet writes a new pref.
+  ///
+  /// We also push the same style to Flutter's [SubtitleView] via
+  /// [_buildSubtitleViewConfiguration] so the on-screen subtitle render is
+  /// guaranteed correct even when libmpv's hardware decoder bypasses the
+  /// `sub-*` properties.
   Future<void> _applyNativeSubtitleStyleFromPrefs() async {
     await applyNativeSubtitleStyle(
       _player,
@@ -220,6 +351,70 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       colorHex: LocalStorage.getSubtitleColor(),
       bgOpacity: LocalStorage.getSubtitleBgOpacity(),
     );
+  }
+
+  /// Build a [SubtitleViewConfiguration] using live Hive prefs. Watching
+  /// the Riverpod providers in [build] makes the [Video] widget rebuild
+  /// the moment the user nudges a slider in the Customize sheet.
+  SubtitleViewConfiguration _buildSubtitleViewConfiguration(WidgetRef ref) {
+    final int size = ref.watch(subtitleSizePrefProvider);
+    final String colorHex = ref.watch(subtitleColorPrefProvider);
+    final double bgOpacity = ref.watch(subtitleBgOpacityPrefProvider);
+    final Color textColor = _hexToColorPlayer(colorHex);
+    return SubtitleViewConfiguration(
+      style: TextStyle(
+        color: textColor,
+        fontSize: size.toDouble(),
+        fontWeight: FontWeight.w600,
+        height: 1.3,
+        letterSpacing: 0,
+        backgroundColor: Colors.black.withValues(alpha: bgOpacity),
+        shadows: const <Shadow>[
+          Shadow(color: Colors.black, blurRadius: 2, offset: Offset(0, 1)),
+        ],
+      ),
+      textAlign: TextAlign.center,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.x4,
+        vertical: AppSpacing.x6,
+      ),
+    );
+  }
+
+  /// Hex parser for `#AARRGGBB`. Same logic as the customize sheet but
+  /// kept duplicated here so the player file does not have to import the
+  /// private helper.
+  static Color _hexToColorPlayer(String hex) {
+    final String clean = hex.startsWith('#') ? hex.substring(1) : hex;
+    final int parsed = int.tryParse(clean, radix: 16) ?? 0xFFFFFFFF;
+    return Color(parsed);
+  }
+
+  /// Persist [bytes] (or [text]) to a fresh file under the app cache dir
+  /// and return the absolute filesystem path. Used by the Drop/Upload and
+  /// Paste subtitle flows so libmpv can load the track via `file://` —
+  /// data URIs and `content://` schemes are unreliable across Android
+  /// versions and decoder paths.
+  Future<String?> _writeSubtitleToCache({
+    required String suffix,
+    List<int>? bytes,
+    String? text,
+  }) async {
+    try {
+      final Directory dir = await getTemporaryDirectory();
+      final String stamp = DateTime.now().millisecondsSinceEpoch.toString();
+      final File file = File('${dir.path}/veil_sub_$stamp.$suffix');
+      if (bytes != null) {
+        await file.writeAsBytes(bytes, flush: true);
+      } else if (text != null) {
+        await file.writeAsString(text, flush: true);
+      } else {
+        return null;
+      }
+      return file.path;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _applyPlayerChrome() async {
@@ -741,14 +936,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   ),
                 for (final MapEntry<String, List<StreamCaption>> entry
                     in groupedCaptions.entries)
-                  _PlayerOptionRow(
-                    title: entry.key,
-                    subtitle:
-                        '${entry.value.length} track${entry.value.length == 1 ? '' : 's'}',
-                    selected:
-                        _selectedCaption != null &&
+                  _PlayerLanguageRow(
+                    flag: _flagForLanguage(_languageCodeFor(entry.value)),
+                    name: entry.key,
+                    count: entry.value.length,
+                    selected: _selectedCaption != null &&
                         entry.value.contains(_selectedCaption),
-                    showChevron: true,
                     onTap: () {
                       Navigator.of(context).pop();
                       _openSubtitleLanguageSheet(entry.key, entry.value);
@@ -787,6 +980,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 return _PlayerCaptionRow(
                   caption: caption,
                   selected: isSelected,
+                  flag: _flagForLanguage(caption.language),
+                  hearingImpaired: _isHearingImpaired(caption),
                   onTap: () {
                     Navigator.of(context).pop();
                     _selectCaption(caption);
@@ -802,35 +997,65 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// Picks a local subtitle file via the system file picker, then loads it
   /// as the active track. Honors `.srt` / `.vtt` extensions.
+  ///
+  /// Android scoped storage may return a `null` filesystem path with bytes
+  /// instead, or hand back a `content://` URI that libmpv cannot read. We
+  /// cope by writing the picked content to the app cache directory and
+  /// loading it via `file://`.
   Future<void> _pickSubtitleFile() async {
     try {
-      // file_picker 11.x replaced `FilePicker.platform.pickFiles` with a
-      // static method on the [FilePicker] class itself.
       final FilePickerResult? picked = await FilePicker.pickFiles(
         allowMultiple: false,
         type: FileType.custom,
         allowedExtensions: const <String>['srt', 'vtt'],
+        withData: true,
       );
       if (picked == null || picked.files.isEmpty) {
         return;
       }
-      final String? path = picked.files.single.path;
-      if (path == null || path.isEmpty) {
+      final PlatformFile single = picked.files.single;
+      final String suffix = (single.extension ?? 'vtt').toLowerCase();
+
+      String? resolvedPath;
+      if (single.bytes != null && single.bytes!.isNotEmpty) {
+        resolvedPath = await _writeSubtitleToCache(
+          suffix: suffix,
+          bytes: single.bytes,
+        );
+      } else if (single.path != null && single.path!.isNotEmpty) {
+        // Re-copy into our cache so we always control the lifetime and
+        // avoid issues with content provider URIs disappearing.
+        try {
+          final List<int> bytes = await File(single.path!).readAsBytes();
+          resolvedPath = await _writeSubtitleToCache(
+            suffix: suffix,
+            bytes: bytes,
+          );
+        } catch (_) {
+          resolvedPath = single.path;
+        }
+      }
+
+      if (resolvedPath == null || resolvedPath.isEmpty || !mounted) {
+        if (mounted) {
+          _setSubtitleState(
+            enabled: _subtitlesEnabled,
+            message: 'Could not read that file',
+          );
+        }
         return;
       }
-      if (!mounted) {
-        return;
-      }
+
       _selectedCaption = null;
       _subtitlesEnabled = true;
       await _player.setSubtitleTrack(
         SubtitleTrack.uri(
-          'file://$path',
-          title: picked.files.single.name,
+          'file://$resolvedPath',
+          title: single.name,
           language: 'local',
         ),
       );
-      _setSubtitleState(enabled: true, message: 'Loaded ${picked.files.single.name}');
+      _setSubtitleState(enabled: true, message: 'Loaded ${single.name}');
     } catch (_) {
       if (mounted) {
         _setSubtitleState(
@@ -914,18 +1139,30 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
     final bool isVtt = trimmed.toUpperCase().startsWith('WEBVTT');
-    final String mime = isVtt ? 'text/vtt' : 'application/x-subrip';
-    final String dataUri =
-        'data:$mime;base64,${base64Encode(utf8.encode(trimmed))}';
-    if (!mounted) {
+    // libmpv accepts `file://` reliably; it does not always resolve
+    // `data:` URIs across Android versions, so we materialise the pasted
+    // text to the cache dir first and load that.
+    final String suffix = isVtt ? 'vtt' : 'srt';
+    final String? path = await _writeSubtitleToCache(
+      suffix: suffix,
+      text: trimmed,
+    );
+    if (path == null || path.isEmpty || !mounted) {
+      if (mounted) {
+        _setSubtitleState(
+          enabled: _subtitlesEnabled,
+          message: 'Could not save pasted subtitle',
+        );
+      }
       return;
     }
+
     _selectedCaption = null;
     _subtitlesEnabled = true;
     try {
       await _player.setSubtitleTrack(
         SubtitleTrack.uri(
-          dataUri,
+          'file://$path',
           title: 'Pasted',
           language: 'local',
         ),
@@ -942,13 +1179,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   /// Read-only transcript viewer. Fetches the selected track, parses cue
-  /// lines, and renders them as a scrollable list with timestamps.
+  /// lines, and renders them as a scrollable list with timestamps. Stream
+  /// preferred headers are forwarded so providers that gate captions
+  /// behind referrer/origin checks still serve the file.
   Future<void> _openTranscriptSheet(StreamCaption caption) async {
+    final StreamPlayback playback = widget.args.streamResult.stream;
+    final Map<String, String> headers = playback.preferredHeaders.isNotEmpty
+        ? playback.preferredHeaders
+        : playback.headers;
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
         return _PlayerSheetScaffold(
           child: _TranscriptSheet(
             caption: caption,
+            headers: headers,
             onBack: () => Navigator.of(context).pop(),
           ),
         );
@@ -1577,6 +1821,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                             controls: NoVideoControls,
                             fit: BoxFit.contain,
                             fill: AppColors.blackC50,
+                            // Flutter-side subtitle render. media_kit pushes
+                            // the active text track to `_player.stream.subtitle`
+                            // and SubtitleView paints it with the
+                            // [TextStyle] below — guaranteed independent of
+                            // libmpv's hardware decode path. Style is read
+                            // live from Hive prefs so the Customize sheet
+                            // updates immediately.
+                            subtitleViewConfiguration:
+                                _buildSubtitleViewConfiguration(ref),
                           )
                         : const SizedBox.shrink(),
                   ),
@@ -2102,26 +2355,43 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Wrap(
-            spacing: AppSpacing.x3,
-            runSpacing: AppSpacing.x3,
+          // True 2x2 grid (web parity). Two equal columns by Row+Expanded so
+          // narrow phones do not collapse into a 1-per-line stack like the
+          // old [Wrap] did, and so all four cards keep matching height.
+          Row(
             children: <Widget>[
-              _PlayerSettingsCard(
-                title: 'Quality',
-                subtitle: qualityLabel,
-                onTap: onQualityTap,
+              Expanded(
+                child: _PlayerSettingsCard(
+                  title: 'Quality',
+                  subtitle: qualityLabel,
+                  onTap: onQualityTap,
+                ),
               ),
-              _PlayerSettingsCard(
-                title: 'Source',
-                subtitle: sourceLabel,
-                onTap: onSourceTap,
+              const SizedBox(width: AppSpacing.x3),
+              Expanded(
+                child: _PlayerSettingsCard(
+                  title: 'Source',
+                  subtitle: sourceLabel,
+                  onTap: onSourceTap,
+                ),
               ),
-              _PlayerSettingsCard(
-                title: 'Subtitles',
-                subtitle: subtitleLabel,
-                onTap: onSubtitlesTap,
+            ],
+          ),
+          const SizedBox(height: AppSpacing.x3),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _PlayerSettingsCard(
+                  title: 'Subtitles',
+                  subtitle: subtitleLabel,
+                  onTap: onSubtitlesTap,
+                ),
               ),
-              _PlayerSettingsCard(title: 'Audio', subtitle: audioLabel),
+              const SizedBox(width: AppSpacing.x3),
+              Expanded(
+                child:
+                    _PlayerSettingsCard(title: 'Audio', subtitle: audioLabel),
+              ),
             ],
           ),
           const SizedBox(height: AppSpacing.x4),
@@ -2229,10 +2499,11 @@ class _PlayerSettingsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final double width =
-        (MediaQuery.sizeOf(context).width - AppSpacing.x12) / 2;
+    // Now used inside Row+Expanded for a true 2x2 grid; the card simply
+    // fills its column. Fixed inner height keeps the four cards aligned
+    // even when subtitle/source labels wrap to two lines.
     return SizedBox(
-      width: width.clamp(140, 220).toDouble(),
+      height: AppSpacing.x20,
       child: Material(
         color: AppColors.blackC125,
         borderRadius: BorderRadius.circular(AppSpacing.x4),
@@ -2246,21 +2517,22 @@ class _PlayerSettingsCard extends StatelessWidget {
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: <Widget>[
                 Text(
                   title,
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: AppColors.typeEmphasis,
-                  ),
+                        color: AppColors.typeEmphasis,
+                      ),
                 ),
-                const SizedBox(height: AppSpacing.x2),
+                const SizedBox(height: AppSpacing.x1),
                 Text(
                   subtitle,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: AppColors.typeSecondary,
-                  ),
+                        color: AppColors.typeSecondary,
+                      ),
                 ),
               ],
             ),
@@ -2546,22 +2818,86 @@ class _OnlineSubtitleSearchSheetState
   }
 }
 
+/// Single subtitle track row used in the language detail sheet. Mirrors
+/// the web `SubtitleTrackList.tsx` layout: flag + name + format / provider
+/// chips + optional hearing-impaired tag + selected check. Long-press
+/// reveals the source URL so the user can verify or copy it.
 class _PlayerCaptionRow extends StatelessWidget {
   const _PlayerCaptionRow({
     required this.caption,
     required this.selected,
     required this.onTap,
+    required this.flag,
+    required this.hearingImpaired,
   });
 
   final StreamCaption caption;
   final bool selected;
   final VoidCallback onTap;
+  final String flag;
+  final bool hearingImpaired;
 
-  String _languageBadge(String? value) {
-    final String normalized = (value == null || value.trim().isEmpty)
-        ? '??'
-        : value.trim().toUpperCase();
-    return normalized.length >= 2 ? normalized.substring(0, 2) : normalized;
+  void _showSourceTooltip(BuildContext context) {
+    final String url = caption.url ?? '';
+    if (url.isEmpty) {
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.modalBackground,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.x4,
+              AppSpacing.x0,
+              AppSpacing.x4,
+              AppSpacing.x4,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  caption.label ?? caption.language ?? 'Subtitle source',
+                  style: Theme.of(sheetContext).textTheme.titleMedium,
+                ),
+                const SizedBox(height: AppSpacing.x2),
+                if (hearingImpaired)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: AppSpacing.x2),
+                    child: Text(
+                      'Hearing impaired: yes',
+                      style: Theme.of(sheetContext).textTheme.bodySmall,
+                    ),
+                  ),
+                SelectableText(
+                  url,
+                  style: Theme.of(sheetContext).textTheme.bodySmall?.copyWith(
+                        color: AppColors.typeText,
+                      ),
+                ),
+                const SizedBox(height: AppSpacing.x3),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: url));
+                      if (sheetContext.mounted) {
+                        Navigator.of(sheetContext).pop();
+                      }
+                    },
+                    icon: const Icon(Icons.copy_rounded),
+                    label: const Text('Copy URL'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -2575,6 +2911,7 @@ class _PlayerCaptionRow extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        onLongPress: () => _showSourceTooltip(context),
         borderRadius: BorderRadius.circular(AppSpacing.x4),
         child: Padding(
           padding: const EdgeInsets.symmetric(
@@ -2592,10 +2929,8 @@ class _PlayerCaptionRow extends StatelessWidget {
                 ),
                 alignment: Alignment.center,
                 child: Text(
-                  _languageBadge(caption.language),
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: AppColors.typeEmphasis,
-                  ),
+                  flag,
+                  style: const TextStyle(fontSize: 22),
                 ),
               ),
               const SizedBox(width: AppSpacing.x3),
@@ -2606,35 +2941,23 @@ class _PlayerCaptionRow extends StatelessWidget {
                     Text(
                       caption.label ?? caption.language ?? 'Subtitle track',
                       style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: AppColors.typeEmphasis,
-                      ),
+                            color: AppColors.typeEmphasis,
+                          ),
                     ),
-                    if (badges.isNotEmpty) ...<Widget>[
+                    if (badges.isNotEmpty || hearingImpaired) ...<Widget>[
                       const SizedBox(height: AppSpacing.x2),
                       Wrap(
                         spacing: AppSpacing.x2,
                         runSpacing: AppSpacing.x2,
-                        children: badges
-                            .map(
-                              (String badge) => Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: AppSpacing.x2,
-                                  vertical: AppSpacing.x1,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: AppColors.blackC125,
-                                  borderRadius: BorderRadius.circular(
-                                    AppSpacing.x2,
-                                  ),
-                                ),
-                                child: Text(
-                                  badge.toUpperCase(),
-                                  style: Theme.of(context).textTheme.labelSmall
-                                      ?.copyWith(color: AppColors.typeEmphasis),
-                                ),
-                              ),
-                            )
-                            .toList(growable: false),
+                        children: <Widget>[
+                          for (final String badge in badges)
+                            _CaptionBadge(label: badge.toUpperCase()),
+                          if (hearingImpaired)
+                            const _CaptionBadge(
+                              label: 'SDH',
+                              accent: true,
+                            ),
+                        ],
                       ),
                     ],
                   ],
@@ -2645,6 +2968,110 @@ class _PlayerCaptionRow extends StatelessWidget {
                   Icons.check_circle_rounded,
                   color: AppColors.purpleC100,
                 ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CaptionBadge extends StatelessWidget {
+  const _CaptionBadge({required this.label, this.accent = false});
+
+  final String label;
+  final bool accent;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.x2,
+        vertical: AppSpacing.x1,
+      ),
+      decoration: BoxDecoration(
+        color: accent ? AppColors.buttonsPurple : AppColors.blackC125,
+        borderRadius: BorderRadius.circular(AppSpacing.x2),
+      ),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: AppColors.typeEmphasis,
+              fontWeight: FontWeight.w600,
+            ),
+      ),
+    );
+  }
+}
+
+/// Subtitle root sheet entry per language. Mirrors image 3: flag avatar +
+/// language name + count chip + chevron. Selecting drills into
+/// `_PlayerCaptionRow` for the per-track picker.
+class _PlayerLanguageRow extends StatelessWidget {
+  const _PlayerLanguageRow({
+    required this.flag,
+    required this.name,
+    required this.count,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String flag;
+  final String name;
+  final int count;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AppSpacing.x4),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.x2,
+            vertical: AppSpacing.x3,
+          ),
+          child: Row(
+            children: <Widget>[
+              Container(
+                width: AppSpacing.x10,
+                height: AppSpacing.x10,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: AppColors.blackC125,
+                  borderRadius: BorderRadius.circular(AppSpacing.x3),
+                ),
+                child: Text(flag, style: const TextStyle(fontSize: 22)),
+              ),
+              const SizedBox(width: AppSpacing.x3),
+              Expanded(
+                child: Text(
+                  name,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: selected
+                            ? AppColors.typeEmphasis
+                            : AppColors.typeText,
+                      ),
+                ),
+              ),
+              if (count > 1)
+                Padding(
+                  padding: const EdgeInsets.only(right: AppSpacing.x2),
+                  child: Text(
+                    '$count',
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                          color: AppColors.typeSecondary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                ),
+              const Icon(
+                Icons.chevron_right_rounded,
+                color: AppColors.typeSecondary,
+              ),
             ],
           ),
         ),
@@ -2749,6 +3176,22 @@ class _SubtitleCustomizeSheetState extends State<_SubtitleCustomizeSheet> {
   late int _size = widget.initialSize;
   late String _color = widget.initialColor;
   late double _bgOpacity = widget.initialBgOpacity;
+  // Debounce Hive writes triggered by drag gestures so the storage box does
+  // not get hammered ~60 times a second when the user drags a slider.
+  Timer? _writeDebounce;
+
+  @override
+  void dispose() {
+    _writeDebounce?.cancel();
+    super.dispose();
+  }
+
+  void _scheduleWrite({int? size, String? color, double? bgOpacity}) {
+    _writeDebounce?.cancel();
+    _writeDebounce = Timer(const Duration(milliseconds: 200), () {
+      widget.onChanged(size: size, color: color, bgOpacity: bgOpacity);
+    });
+  }
 
   static const List<({String hex, String label, Color swatch})> _palette =
       <({String hex, String label, Color swatch})>[
@@ -2843,6 +3286,9 @@ class _SubtitleCustomizeSheetState extends State<_SubtitleCustomizeSheet> {
               setState(() {
                 _size = value.round();
               });
+              _scheduleWrite(size: _size);
+            },
+            onChangeEnd: (double value) {
               widget.onChanged(size: _size);
             },
           ),
@@ -2882,6 +3328,9 @@ class _SubtitleCustomizeSheetState extends State<_SubtitleCustomizeSheet> {
               setState(() {
                 _bgOpacity = value;
               });
+              _scheduleWrite(bgOpacity: _bgOpacity);
+            },
+            onChangeEnd: (double value) {
               widget.onChanged(bgOpacity: _bgOpacity);
             },
           ),
@@ -2939,9 +3388,14 @@ class _ColorSwatch extends StatelessWidget {
 /// Read-only transcript reader. Streams the chosen caption track over
 /// HTTP, runs a tolerant VTT/SRT parser, and renders cues with timestamps.
 class _TranscriptSheet extends StatefulWidget {
-  const _TranscriptSheet({required this.caption, required this.onBack});
+  const _TranscriptSheet({
+    required this.caption,
+    required this.onBack,
+    this.headers = const <String, String>{},
+  });
 
   final StreamCaption caption;
+  final Map<String, String> headers;
   final VoidCallback onBack;
 
   @override
@@ -2957,7 +3411,7 @@ class _TranscriptSheetState extends State<_TranscriptSheet> {
       return const <_TranscriptCue>[];
     }
     final http.Response response = await http
-        .get(Uri.parse(url))
+        .get(Uri.parse(url), headers: widget.headers)
         .timeout(const Duration(seconds: 20));
     if (response.statusCode != 200) {
       throw Exception('Could not load transcript (${response.statusCode})');
