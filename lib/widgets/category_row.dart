@@ -26,9 +26,7 @@ class CategoryRow extends StatelessWidget {
     final int itemCount = isLoading ? _placeholderCount(context) : items.length;
     final TextStyle? titleStyle = Theme.of(context).textTheme.titleLarge
         ?.copyWith(
-          color: useSectionAccent
-              ? AppColors.streamSectionAccent
-              : AppColors.typeEmphasis,
+          color: useSectionAccent ? AppColors.typeLogo : AppColors.typeEmphasis,
           fontWeight: FontWeight.w700,
         );
 
@@ -46,7 +44,7 @@ class CategoryRow extends StatelessWidget {
                   style: TextButton.styleFrom(
                     minimumSize: const Size(48, 44),
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    foregroundColor: AppColors.streamSectionAccent,
+                    foregroundColor: AppColors.typeLink,
                   ),
                   onPressed: onSeeAll,
                   child: Row(
@@ -55,7 +53,7 @@ class CategoryRow extends StatelessWidget {
                       Text(
                         'See all',
                         style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                          color: AppColors.streamSectionAccent,
+                          color: AppColors.typeLink,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -63,7 +61,7 @@ class CategoryRow extends StatelessWidget {
                       Icon(
                         Icons.chevron_right_rounded,
                         size: AppSpacing.x5,
-                        color: AppColors.streamSectionAccent,
+                        color: AppColors.typeLink,
                       ),
                     ],
                   ),

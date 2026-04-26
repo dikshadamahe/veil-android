@@ -10,7 +10,7 @@ import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/tmdb_provider.dart';
 import 'package:pstream_android/widgets/category_row.dart';
 
-enum _HomeCatalogFilter { all, movies, tv, webSeries, sports }
+enum _HomeCatalogFilter { all, movies, tv }
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -73,16 +73,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final Object? error =
         trendingMovies.error ?? trendingTv.error ?? popular.error;
 
-    final bool showSportsOnly = _catalogFilter == _HomeCatalogFilter.sports;
-    final bool showMovieRows =
-        !showSportsOnly &&
-        (_catalogFilter == _HomeCatalogFilter.all ||
-            _catalogFilter == _HomeCatalogFilter.movies);
-    final bool showTvRows =
-        !showSportsOnly &&
-        (_catalogFilter == _HomeCatalogFilter.all ||
-            _catalogFilter == _HomeCatalogFilter.tv ||
-            _catalogFilter == _HomeCatalogFilter.webSeries);
+    final bool showMovieRows = _catalogFilter == _HomeCatalogFilter.all ||
+        _catalogFilter == _HomeCatalogFilter.movies;
+    final bool showTvRows = _catalogFilter == _HomeCatalogFilter.all ||
+        _catalogFilter == _HomeCatalogFilter.tv;
 
     final List<MediaItem> heroCandidates = _heroItems(
       trendingMovies: trendingMovies.value ?? const <MediaItem>[],
@@ -133,7 +127,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   popular.isLoading)
                 const _HomeLoadingState()
               else ...<Widget>[
-                if (!showSportsOnly && heroCandidates.isNotEmpty) ...<Widget>[
+                if (heroCandidates.isNotEmpty) ...<Widget>[
                   RepaintBoundary(
                     child: _HomeHeroCarousel(
                       controller: _heroController,
@@ -146,18 +140,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
                   const SizedBox(height: AppSpacing.x6),
                 ],
-                if (showSportsOnly)
-                  Padding(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: horizontalPadding,
-                    ),
-                    child: const _HomeMessageState(
-                      title: 'Sports',
-                      message:
-                          'Veil does not include a sports catalog yet. Browse movies and TV from the All filter.',
-                    ),
-                  ),
-                if (!showSportsOnly && continueWatching.isNotEmpty) ...<Widget>[
+                if (continueWatching.isNotEmpty) ...<Widget>[
                   CategoryRow(
                     title: 'Continue watching',
                     items: continueWatching,
@@ -166,7 +149,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
                   const SizedBox(height: AppSpacing.x6),
                 ],
-                if (!showSportsOnly && bookmarks.isNotEmpty) ...<Widget>[
+                if (bookmarks.isNotEmpty) ...<Widget>[
                   CategoryRow(
                     title: 'My list',
                     items: bookmarks,
@@ -205,8 +188,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     useSectionAccent: true,
                     onSeeAll: () => context.go('/search'),
                   ),
-                if (!showSportsOnly &&
-                    (trendingMovies.value ?? const <MediaItem>[]).isEmpty &&
+                if ((trendingMovies.value ?? const <MediaItem>[]).isEmpty &&
                     (trendingTv.value ?? const <MediaItem>[]).isEmpty &&
                     (popular.value ?? const <MediaItem>[]).isEmpty)
                   const _HomeMessageState(
@@ -229,10 +211,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       case _HomeCatalogFilter.movies:
         return trendingMovies.take(8).toList(growable: false);
       case _HomeCatalogFilter.tv:
-      case _HomeCatalogFilter.webSeries:
         return trendingTv.take(8).toList(growable: false);
-      case _HomeCatalogFilter.sports:
-        return const <MediaItem>[];
       case _HomeCatalogFilter.all:
         final List<MediaItem> merged = <MediaItem>[
           ...trendingMovies.take(5),
@@ -251,30 +230,27 @@ class _HomeTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final double logoSize = switch (layoutClass) {
-      WindowClass.compact => AppSpacing.x10,
-      WindowClass.medium => AppSpacing.x12,
-      WindowClass.expanded => AppSpacing.x12 + AppSpacing.x2,
+    final double brandHeight = switch (layoutClass) {
+      WindowClass.compact => 34,
+      WindowClass.medium => 38,
+      WindowClass.expanded => 40,
     };
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: <Widget>[
-        _VeilGlyph(size: logoSize),
-        const SizedBox(width: AppSpacing.x3),
         Expanded(
-          child: Text(
-            'Veil',
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-              color: AppColors.typeEmphasis,
-              fontWeight: FontWeight.w700,
-              letterSpacing: -0.5,
-            ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: _HomeBrandMark(height: brandHeight),
           ),
         ),
         Material(
-          color: AppColors.searchPillSurface,
-          borderRadius: BorderRadius.circular(AppSpacing.x4),
+          color: AppColors.searchBackground,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppSpacing.x4),
+            side: const BorderSide(color: AppColors.dropdownBorder),
+          ),
           child: InkWell(
             borderRadius: BorderRadius.circular(AppSpacing.x4),
             onTap: onSearchTap,
@@ -286,43 +262,20 @@ class _HomeTopBar extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  Text(
-                    'Search',
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: AppColors.searchPillOnSurface.withValues(
-                        alpha: 0.55,
-                      ),
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(width: AppSpacing.x2),
                   Icon(
                     Icons.search_rounded,
                     size: AppSpacing.x5,
-                    color: AppColors.searchPillOnSurface.withValues(alpha: 0.6),
+                    color: AppColors.searchIcon,
+                  ),
+                  const SizedBox(width: AppSpacing.x2),
+                  Text(
+                    'Search',
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: AppColors.searchPlaceholder,
+                          fontWeight: FontWeight.w500,
+                        ),
                   ),
                 ],
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: AppSpacing.x2),
-        Tooltip(
-          message: 'Notifications are not available yet.',
-          child: IconButton(
-            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-            padding: EdgeInsets.zero,
-            onPressed: () {},
-            icon: Badge(
-              smallSize: AppSpacing.x1,
-              backgroundColor: AppColors.streamSectionAccent,
-              child: Icon(
-                Icons.notifications_none_rounded,
-                color: AppColors.typeSecondary,
-                size: switch (layoutClass) {
-                  WindowClass.compact => AppSpacing.x5,
-                  _ => AppSpacing.x6,
-                },
               ),
             ),
           ),
@@ -332,31 +285,32 @@ class _HomeTopBar extends StatelessWidget {
   }
 }
 
-class _VeilGlyph extends StatelessWidget {
-  const _VeilGlyph({required this.size});
+/// Logo asset, or a single purple wordmark — no duplicate “V + Veil” lockup.
+class _HomeBrandMark extends StatelessWidget {
+  const _HomeBrandMark({required this.height});
 
-  final double size;
+  final double height;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: size,
-      height: size,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: AppColors.streamSectionAccent, width: 2),
-        ),
-        child: Center(
-          child: Text(
-            'V',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: AppColors.streamSectionAccent,
-              fontWeight: FontWeight.w800,
-              height: 1,
-            ),
-          ),
-        ),
+      height: height,
+      child: Image.asset(
+        'logo.png',
+        fit: BoxFit.contain,
+        alignment: Alignment.centerLeft,
+        filterQuality: FilterQuality.medium,
+        errorBuilder: (BuildContext context, Object error, StackTrace? st) {
+          return Text(
+            'Veil',
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  color: AppColors.typeLogo,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.75,
+                  height: 1,
+                ),
+          );
+        },
       ),
     );
   }
@@ -372,12 +326,10 @@ class _HomeCategoryChips extends StatelessWidget {
   Widget build(BuildContext context) {
     const List<({String label, _HomeCatalogFilter value})> options =
         <({String label, _HomeCatalogFilter value})>[
-          (label: 'All', value: _HomeCatalogFilter.all),
-          (label: 'Movies', value: _HomeCatalogFilter.movies),
-          (label: 'TV', value: _HomeCatalogFilter.tv),
-          (label: 'Web series', value: _HomeCatalogFilter.webSeries),
-          (label: 'Sports', value: _HomeCatalogFilter.sports),
-        ];
+      (label: 'All', value: _HomeCatalogFilter.all),
+      (label: 'Movies', value: _HomeCatalogFilter.movies),
+      (label: 'TV', value: _HomeCatalogFilter.tv),
+    ];
 
     return SizedBox(
       height: 44,
@@ -389,7 +341,7 @@ class _HomeCategoryChips extends StatelessWidget {
           final ({String label, _HomeCatalogFilter value}) opt = options[index];
           final bool isOn = selected == opt.value;
           return Material(
-            color: isOn ? AppColors.streamSectionAccent : AppColors.transparent,
+            color: isOn ? AppColors.purpleC700 : AppColors.transparent,
             borderRadius: BorderRadius.circular(21),
             child: InkWell(
               borderRadius: BorderRadius.circular(21),
@@ -404,9 +356,7 @@ class _HomeCategoryChips extends StatelessWidget {
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(21),
                   border: Border.all(
-                    color: isOn
-                        ? AppColors.streamSectionAccent
-                        : AppColors.ashC100,
+                    color: isOn ? AppColors.purpleC400 : AppColors.dropdownBorder,
                   ),
                 ),
                 child: Center(
@@ -488,9 +438,7 @@ class _HomeHeroCarousel extends StatelessWidget {
                   height: AppSpacing.x2,
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(AppSpacing.x1),
-                    color: active
-                        ? AppColors.streamSectionAccent
-                        : AppColors.ashC600,
+                    color: active ? AppColors.typeLogo : AppColors.ashC600,
                   ),
                 ),
               );
@@ -566,7 +514,7 @@ class _HomeHeroSlide extends StatelessWidget {
                     width: AppSpacing.x2,
                     height: AppSpacing.x2,
                     decoration: const BoxDecoration(
-                      color: AppColors.typeEmphasis,
+                      color: AppColors.typeLogo,
                       shape: BoxShape.circle,
                     ),
                   ),

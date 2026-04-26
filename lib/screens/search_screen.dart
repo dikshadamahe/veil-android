@@ -116,18 +116,19 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                 AppSpacing.x3,
               ),
               child: Material(
-                color: AppColors.searchPillSurface,
-                borderRadius: BorderRadius.circular(
-                  AppSpacing.x4 + AppSpacing.x1,
+                color: AppColors.searchBackground,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(
+                    AppSpacing.x4 + AppSpacing.x1,
+                  ),
+                  side: const BorderSide(color: AppColors.dropdownBorder),
                 ),
                 child: Row(
                   children: <Widget>[
                     const SizedBox(width: AppSpacing.x3),
                     Icon(
                       Icons.search_rounded,
-                      color: AppColors.searchPillOnSurface.withValues(
-                        alpha: 0.55,
-                      ),
+                      color: AppColors.searchIcon,
                       size: AppSpacing.x5,
                     ),
                     const SizedBox(width: AppSpacing.x2),
@@ -136,17 +137,15 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                         controller: _controller,
                         focusNode: _focusNode,
                         style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                          color: AppColors.searchPillOnSurface,
-                        ),
-                        cursorColor: AppColors.streamSectionAccent,
+                              color: AppColors.searchText,
+                            ),
+                        cursorColor: AppColors.typeLink,
                         decoration: InputDecoration(
                           border: InputBorder.none,
                           hintText: 'Search titles, people, or studios',
                           hintStyle: Theme.of(context).textTheme.bodyLarge
                               ?.copyWith(
-                                color: AppColors.searchPillOnSurface.withValues(
-                                  alpha: 0.45,
-                                ),
+                                color: AppColors.searchPlaceholder,
                               ),
                           isDense: true,
                           contentPadding: const EdgeInsets.symmetric(
@@ -162,21 +161,17 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                           minHeight: 44,
                         ),
                         onPressed: () => _controller.clear(),
-                        icon: Icon(
+                        icon: const Icon(
                           Icons.close_rounded,
-                          color: AppColors.searchPillOnSurface.withValues(
-                            alpha: 0.55,
-                          ),
+                          color: AppColors.searchIcon,
                         ),
                       )
                     else
-                      Padding(
-                        padding: const EdgeInsets.only(right: AppSpacing.x2),
+                      const Padding(
+                        padding: EdgeInsets.only(right: AppSpacing.x2),
                         child: Icon(
                           Icons.chevron_right_rounded,
-                          color: AppColors.searchPillOnSurface.withValues(
-                            alpha: 0.45,
-                          ),
+                          color: AppColors.typeSecondary,
                         ),
                       ),
                   ],
@@ -265,7 +260,7 @@ class _SearchResultsGrid extends StatelessWidget {
           child: Text(
             title,
             style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: AppColors.streamSectionAccent,
+              color: AppColors.typeLogo,
               fontWeight: FontWeight.w700,
             ),
           ),
@@ -332,7 +327,7 @@ class _SearchMessageState extends StatelessWidget {
                   Icon(
                     Icons.search_off_rounded,
                     size: AppSpacing.x10,
-                    color: AppColors.streamSectionAccent,
+                    color: AppColors.typeLogo,
                   ),
                   const SizedBox(height: AppSpacing.x4),
                   Text(

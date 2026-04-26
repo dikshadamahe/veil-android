@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../config/app_theme.dart';
 import '../config/breakpoints.dart';
 
+/// Shell navigation: **always** bottom dock (no side rail), inspired by streaming
+/// app layouts — placement only; colors follow Veil dark + purple tokens.
 class AdaptiveNav extends StatelessWidget {
   const AdaptiveNav({
     super.key,
@@ -36,94 +38,53 @@ class AdaptiveNav extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final layoutClass = windowClass(context);
-
-    if (layoutClass == WindowClass.compact) {
-      return Scaffold(
-        backgroundColor: AppColors.backgroundMain,
-        body: child,
-        bottomNavigationBar: BottomNavigationBar(
-          currentIndex: currentIndex,
-          onTap: onDestinationSelected,
-          type: BottomNavigationBarType.fixed,
-          backgroundColor: AppColors.backgroundSecondary,
-          selectedItemColor: AppColors.typeEmphasis,
-          unselectedItemColor: AppColors.typeSecondary,
-          items: _destinations
-              .asMap()
-              .entries
-              .map((MapEntry<int, _AdaptiveNavDestination> e) {
-                final bool selected = currentIndex == e.key;
-                return BottomNavigationBarItem(
-                  icon: Icon(
-                    e.value.resolvedIcon(selected),
-                    size: AppSpacing.x6,
-                  ),
-                  label: e.value.label,
-                );
-              })
-              .toList(growable: false),
-        ),
-      );
-    }
-
-    final isExpanded = layoutClass == WindowClass.expanded;
-    final railIconSize = isExpanded ? AppSpacing.x8 : AppSpacing.x6;
+    final WindowClass layoutClass = windowClass(context);
+    final double dockHorizontal = switch (layoutClass) {
+      WindowClass.compact => AppSpacing.x4,
+      WindowClass.medium => AppSpacing.x8,
+      WindowClass.expanded => AppSpacing.x10,
+    };
 
     return Scaffold(
       backgroundColor: AppColors.backgroundMain,
-      body: Row(
-        children: [
-          SafeArea(
-            child: NavigationRailTheme(
-              data: NavigationRailThemeData(
-                minWidth: AppSpacing.x16,
-                groupAlignment: -1,
-                elevation: 0,
-              ),
-              child: NavigationRail(
-                selectedIndex: currentIndex,
-                onDestinationSelected: onDestinationSelected,
-                extended: false,
-                labelType: NavigationRailLabelType.all,
-                backgroundColor: AppColors.backgroundSecondary,
-                indicatorColor: AppColors.buttonsToggle,
-                leading: const SizedBox(height: AppSpacing.x2),
-                selectedIconTheme: IconThemeData(
-                  color: AppColors.typeEmphasis,
-                  size: railIconSize,
-                ),
-                unselectedIconTheme: IconThemeData(
-                  color: AppColors.typeSecondary,
-                  size: railIconSize,
-                ),
-                selectedLabelTextStyle: Theme.of(context).textTheme.labelLarge
-                    ?.copyWith(
-                      color: AppColors.typeEmphasis,
-                      fontWeight: FontWeight.w600,
-                    ),
-                unselectedLabelTextStyle: Theme.of(context).textTheme.labelLarge
-                    ?.copyWith(color: AppColors.typeSecondary),
-                destinations: _destinations
-                    .asMap()
-                    .entries
-                    .map((MapEntry<int, _AdaptiveNavDestination> e) {
-                      return NavigationRailDestination(
-                        icon: Icon(e.value.icon),
-                        selectedIcon: Icon(e.value.resolvedIcon(true)),
-                        label: Text(e.value.label),
-                      );
-                    })
-                    .toList(growable: false),
-              ),
+      body: child,
+      bottomNavigationBar: SafeArea(
+        top: false,
+        minimum: EdgeInsets.zero,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            dockHorizontal,
+            AppSpacing.x2,
+            dockHorizontal,
+            AppSpacing.x3,
+          ),
+          child: Material(
+            color: AppColors.blackC100,
+            elevation: 6,
+            shadowColor: AppColors.blackC50,
+            borderRadius: BorderRadius.circular(AppSpacing.x8),
+            clipBehavior: Clip.antiAlias,
+            child: NavigationBar(
+              height: 64,
+              backgroundColor: AppColors.blackC100,
+              surfaceTintColor: AppColors.transparent,
+              indicatorColor: AppColors.purpleC600.withValues(alpha: 0.35),
+              selectedIndex: currentIndex,
+              onDestinationSelected: onDestinationSelected,
+              labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+              destinations: _destinations.asMap().entries.map(
+                (MapEntry<int, _AdaptiveNavDestination> e) {
+                  final bool selected = currentIndex == e.key;
+                  return NavigationDestination(
+                    icon: Icon(e.value.icon),
+                    selectedIcon: Icon(e.value.resolvedIcon(selected)),
+                    label: e.value.label,
+                  );
+                },
+              ).toList(growable: false),
             ),
           ),
-          const SizedBox(
-            width: AppSpacing.x1,
-            child: ColoredBox(color: AppColors.utilsDivider),
-          ),
-          Expanded(child: child),
-        ],
+        ),
       ),
     );
   }

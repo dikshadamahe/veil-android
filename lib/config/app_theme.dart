@@ -49,17 +49,6 @@ class AppColors {
   static const Color error = semanticRedC100;
   static const Color warning = semanticYellowC100;
 
-  /// Figma community reference accent (#e50202) for section headers / chips.
-  static const Color streamSectionAccent = Color(0xFFE50202);
-
-  /// Splash cinematic gradient (Figma node 1:2) — pairs with [blackC50].
-  static const Color splashGradientMid = Color(0xFF3D0A0A);
-  static const Color splashGradientEnd = Color(0xFFE50914);
-
-  /// Light “pill” surface for search bars on dark shells (Figma #ededed analog).
-  static const Color searchPillSurface = Color(0xFFEDEDED);
-  static const Color searchPillOnSurface = Color(0xFF515151);
-
   // Base tokens: blue
   static const Color blueC50 = Color(0xFFCCCCD6);
   static const Color blueC100 = Color(0xFFA2A2A2);

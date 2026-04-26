@@ -104,7 +104,7 @@ class _MyListHeader extends StatelessWidget {
           children: <Widget>[
             Icon(
               Icons.bookmark_outline_rounded,
-              color: AppColors.streamSectionAccent,
+              color: AppColors.typeLogo,
               size: AppSpacing.x6,
             ),
             const SizedBox(width: AppSpacing.x2),
@@ -119,8 +119,11 @@ class _MyListHeader extends StatelessWidget {
         ),
         const SizedBox(height: AppSpacing.x4),
         Material(
-          color: AppColors.searchPillSurface,
-          borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
+          color: AppColors.searchBackground,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
+            side: const BorderSide(color: AppColors.dropdownBorder),
+          ),
           child: InkWell(
             borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
             onTap: onSearchTap,
@@ -131,11 +134,9 @@ class _MyListHeader extends StatelessWidget {
               ),
               child: Row(
                 children: <Widget>[
-                  Icon(
+                  const Icon(
                     Icons.search_rounded,
-                    color: AppColors.searchPillOnSurface.withValues(
-                      alpha: 0.55,
-                    ),
+                    color: AppColors.searchIcon,
                     size: AppSpacing.x5,
                   ),
                   const SizedBox(width: AppSpacing.x3),
@@ -143,17 +144,13 @@ class _MyListHeader extends StatelessWidget {
                     child: Text(
                       'Search',
                       style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: AppColors.searchPillOnSurface.withValues(
-                          alpha: 0.45,
-                        ),
-                      ),
+                            color: AppColors.searchPlaceholder,
+                          ),
                     ),
                   ),
-                  Icon(
+                  const Icon(
                     Icons.chevron_right_rounded,
-                    color: AppColors.searchPillOnSurface.withValues(
-                      alpha: 0.45,
-                    ),
+                    color: AppColors.typeSecondary,
                   ),
                 ],
               ),
@@ -198,7 +195,7 @@ class _MyListEmpty extends StatelessWidget {
                     Icon(
                       Icons.bookmark_add_outlined,
                       size: AppSpacing.x10,
-                      color: AppColors.streamSectionAccent,
+                      color: AppColors.typeLogo,
                     ),
                     const SizedBox(height: AppSpacing.x4),
                     Text(

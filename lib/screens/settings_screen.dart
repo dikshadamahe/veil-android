@@ -225,7 +225,7 @@ class _SettingsProfileHeader extends StatelessWidget {
           child: Icon(
             Icons.person_rounded,
             size: AppSpacing.x8,
-            color: AppColors.streamSectionAccent,
+            color: AppColors.typeLogo,
           ),
         ),
         const SizedBox(width: AppSpacing.x4),
@@ -365,7 +365,7 @@ class _SettingsSection extends StatelessWidget {
             Text(
               title,
               style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                color: AppColors.streamSectionAccent,
+                color: AppColors.typeLogo,
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -396,7 +396,7 @@ class _SettingsNavTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: AppColors.searchPillSurface.withValues(alpha: 0.12),
+      color: AppColors.blackC150,
       borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
       child: InkWell(
         borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
@@ -446,7 +446,7 @@ class _SettingsPlaceholderNavTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: AppColors.searchPillSurface.withValues(alpha: 0.12),
+      color: AppColors.blackC150,
       borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
       child: InkWell(
         borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
