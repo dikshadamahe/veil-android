@@ -48,6 +48,12 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # Same as local release prep (`dart run flutter_launcher_icons`): keeps
+      # mipmap/adaptive assets in sync with `logo-circle.png` without relying
+      # on pre-generated binaries in the tag ref.
+      - name: Generate Android launcher icons
+        run: dart run flutter_launcher_icons
+
       - name: Validate release secrets
         run: |
           if [ -z "${TMDB_TOKEN}" ]; then
@@ -64,18 +70,18 @@ jobs:
       - name: Analyze
         run: flutter analyze
 
+      # Mirrors local: flutter build apk --release \
+      #   --dart-define=ORACLE_URL=...   (base URL with or without :3001)
+      #   --dart-define=TMDB_TOKEN=...
       - name: Build APK
         run: |
           BUILD_ARGS=(
             "build"
             "apk"
             "--release"
+            "--dart-define=ORACLE_URL=${ORACLE_URL}"
             "--dart-define=TMDB_TOKEN=${TMDB_TOKEN}"
           )
-
-          if [ -n "${ORACLE_URL}" ]; then
-            BUILD_ARGS+=("--dart-define=ORACLE_URL=${ORACLE_URL}")
-          fi
           if [ -n "${WYZIE_API_KEY}" ]; then
             BUILD_ARGS+=("--dart-define=WYZIE_API_KEY=${WYZIE_API_KEY}")
           fi

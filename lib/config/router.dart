@@ -29,22 +29,32 @@ final GoRouter appRouter = GoRouter(
             GoRouterState state,
             StatefulNavigationShell navigationShell,
           ) {
-            return AdaptiveNav(
-              currentIndex: navigationShell.currentIndex,
-              onDestinationSelected: (int index) {
-                // Use explicit locations so each tab always resolves (goBranch alone
-                // can fail to switch when branch restoration state is empty/stale).
-                const List<String> shellLocations = <String>[
-                  '/',
-                  '/search',
-                  '/list',
-                  '/settings',
-                ];
-                if (index >= 0 && index < shellLocations.length) {
-                  context.go(shellLocations[index]);
+            return PopScope(
+              // System back at any tab root → switch to Home instead of exiting.
+              // When [navigationShell.currentIndex] is already 0, allow OS exit.
+              canPop: navigationShell.currentIndex == 0,
+              onPopInvokedWithResult: (bool didPop, Object? result) {
+                if (didPop) {
+                  return;
+                }
+                if (navigationShell.currentIndex != 0) {
+                  navigationShell.goBranch(0, initialLocation: false);
                 }
               },
-              child: navigationShell,
+              child: AdaptiveNav(
+                currentIndex: navigationShell.currentIndex,
+                onDestinationSelected: (int index) {
+                  // [goBranch] preserves each tab's nested location and scroll
+                  // state so switching tabs no longer rebuilds from scratch.
+                  // [initialLocation: false] keeps the last visited sub-route
+                  // when revisiting a branch.
+                  navigationShell.goBranch(
+                    index,
+                    initialLocation: index == navigationShell.currentIndex,
+                  );
+                },
+                child: navigationShell,
+              ),
             );
           },
       branches: <StatefulShellBranch>[

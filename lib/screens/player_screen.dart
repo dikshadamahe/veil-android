@@ -110,6 +110,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   late final StorageController _storageController;
   late final StreamService _streamService;
 
+  /// When true, player only allows landscape orientations (auto-flips between
+  /// left/right). When false, follows the device — phones can stay portrait.
+  /// Toggled by the rotate button in [PlayerControls].
+  bool _landscapeLocked = true;
+
+  /// When true, all player controls are hidden and gestures (tap to show /
+  /// edge-swipe brightness/volume) are ignored. A small unlock pill in the
+  /// top-right is the only affordance until the user taps it.
+  bool _controlsLocked = false;
+
   @override
   void initState() {
     super.initState();
@@ -133,7 +143,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    unawaited(_persistProgress(refresh: false));
+    // Capture before subscriptions/player tear-down so async persist does not
+    // read mpv state after [Player.dispose] (race that dropped progress).
+    final int snapPos = _position.inSeconds;
+    final int snapDur = _duration.inSeconds;
+    final bool snapReady = _playerReady;
+    unawaited(
+      _persistProgressValues(
+        positionSecs: snapPos,
+        durationSecs: snapDur,
+        playerReady: snapReady,
+        refresh: true,
+      ),
+    );
     for (final StreamSubscription<dynamic> subscription in _subscriptions) {
       subscription.cancel();
     }
@@ -419,7 +441,43 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _applyPlayerChrome() async {
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    await _applyOrientationPref();
+  }
+
+  /// Force landscape while [_landscapeLocked]; otherwise allow all orientations
+  /// (phones held portrait will stay portrait until the user rotates).
+  Future<void> _applyOrientationPref() async {
+    if (_landscapeLocked) {
+      await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+    } else {
+      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    }
+  }
+
+  Future<void> _toggleAutoRotate() async {
+    setState(() {
+      _landscapeLocked = !_landscapeLocked;
+    });
+    await _applyOrientationPref();
+  }
+
+  void _lockControls() {
+    setState(() {
+      _controlsLocked = true;
+      _controlsVisible = false;
+    });
+    _controlsHideTimer?.cancel();
+  }
+
+  void _unlockControls() {
+    setState(() {
+      _controlsLocked = false;
+      _controlsVisible = true;
+    });
+    _armControlsHideTimer();
   }
 
   @override
@@ -448,6 +506,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         if (!mounted) {
           return;
         }
+        // libmpv emits position ~4×/s. Skip the [setState] (and the entire
+        // controls-overlay rebuild) while the chrome is hidden — the value
+        // is still cached for the next time controls are shown / progress
+        // is persisted.
+        if (!_controlsVisible) {
+          _position = value;
+          return;
+        }
         setState(() {
           _position = value;
         });
@@ -459,9 +525,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         setState(() {
           _duration = value;
         });
+        // Resume needs the source's duration to be known — seeking before
+        // libmpv reports duration is silently ignored. The earlier hook on
+        // `playing == true` fired too soon for HLS/DASH streams, so do the
+        // first seek here too as soon as a positive duration arrives.
+        if (value.inMilliseconds > 0 && !_resumeApplied) {
+          unawaited(_seekToResumePositionIfNeeded());
+        }
       }),
       _player.stream.buffer.listen((Duration value) {
         if (!mounted) {
+          return;
+        }
+        if (!_controlsVisible) {
+          _buffer = value;
           return;
         }
         setState(() {
@@ -515,7 +592,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _resumeFromOverride = resumeFrom;
       }
       _resumeApplied = false;
-      await _player.open(Media(url, httpHeaders: headers));
+      final int? resumeStartSec = _resolvedResumeFrom;
+      await _player.open(
+        Media(
+          url,
+          httpHeaders: headers,
+          start: resumeStartSec != null && resumeStartSec > 0
+              ? Duration(seconds: resumeStartSec)
+              : null,
+        ),
+      );
       await applyNativePlaybackTune(_player);
       await _applyNativeSubtitleStyleFromPrefs();
       await _player.setVolume(_softwareVolume);
@@ -552,15 +638,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
 
+    // Skip the seek until libmpv has loaded the duration — otherwise the
+    // request is dropped and playback restarts from 00:00.
+    if (_duration.inMilliseconds <= 0) {
+      return;
+    }
+
+    final int durationSec = _duration.inSeconds;
+    int targetSec = resumeFrom;
+    if (durationSec > 0) {
+      targetSec = targetSec.clamp(0, durationSec > 2 ? durationSec - 2 : durationSec);
+    }
+    await _player.seek(Duration(seconds: targetSec));
     _resumeApplied = true;
-    await _player.seek(Duration(seconds: resumeFrom));
   }
 
   int? get _resolvedResumeFrom {
     if (_resumeFromOverride != null && _resumeFromOverride! > 0) {
       return _resumeFromOverride;
     }
-    if (widget.args.resumeFrom != null) {
+    if (widget.args.resumeFrom != null && widget.args.resumeFrom! > 0) {
       return widget.args.resumeFrom;
     }
 
@@ -596,14 +693,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<void> _persistProgress({bool refresh = true}) async {
-    if (!_playerReady || _duration.inSeconds <= 0) {
+    await _persistProgressValues(
+      positionSecs: _position.inSeconds,
+      durationSecs: _duration.inSeconds,
+      playerReady: _playerReady,
+      refresh: refresh,
+    );
+  }
+
+  /// Writes watch progress. [durationSecs] may be 0 while HLS/DASH duration is
+  /// still unknown — we still persist [positionSecs] so Continue Watching and
+  /// resume survive an early back press.
+  Future<void> _persistProgressValues({
+    required int positionSecs,
+    required int durationSecs,
+    required bool playerReady,
+    bool refresh = true,
+  }) async {
+    if (!playerReady || positionSecs <= 0) {
       return;
     }
 
     await _storageController.saveProgress(
       widget.args.mediaItem,
-      positionSecs: _position.inSeconds,
-      durationSecs: _duration.inSeconds,
+      positionSecs: positionSecs,
+      durationSecs: durationSecs,
       season: widget.args.season,
       episode: widget.args.episode,
       refresh: refresh,
@@ -683,41 +797,33 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _openPlayerSettingsSheet() async {
     _showControls();
-    final bool subtitlesAvailable =
-        _availableCaptions.isNotEmpty ||
-        _player.state.tracks.subtitle.isNotEmpty;
 
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
-        return _PlayerSheetScaffold(
-          child: _PlayerSettingsHomeSheet(
-            qualityLabel: _currentQualityLabel,
-            sourceLabel: widget.args.streamResult.sourceName,
-            subtitleLabel: _currentSubtitleLabel,
-            audioLabel: _currentAudioLabel,
-            subtitlesEnabled: _subtitlesEnabled,
-            subtitlesAvailable: subtitlesAvailable,
-            onQualityTap: () {
-              Navigator.of(context).pop();
-              _openQualitySheet();
-            },
-            onSourceTap: () {
-              Navigator.of(context).pop();
-              _openSourceSheet();
-            },
-            onSubtitlesTap: () {
-              Navigator.of(context).pop();
-              _openSubtitlesSheet();
-            },
-            onSubtitleToggle: (bool value) {
-              Navigator.of(context).pop();
-              if (value) {
-                _enableAutoSubtitles();
-              } else {
-                _disableSubtitles();
-              }
-            },
-          ),
+        // [StatefulBuilder] so the home sheet rebuilds with fresh labels
+        // after each sub-sheet returns.
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setSheetState) {
+            return _PlayerSheetScaffold(
+              child: _PlayerSettingsHomeSheet(
+                qualityLabel: _currentQualityLabel,
+                sourceLabel: widget.args.streamResult.sourceName,
+                subtitleLabel: _currentSubtitleLabel,
+                onQualityTap: () async {
+                  await _openQualitySheet();
+                  setSheetState(() {});
+                },
+                onSourceTap: () async {
+                  await _openSourceSheet();
+                  setSheetState(() {});
+                },
+                onSubtitlesTap: () async {
+                  await _openSubtitlesSheet();
+                  setSheetState(() {});
+                },
+              ),
+            );
+          },
         );
       },
     );
@@ -802,49 +908,72 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Future<void> _openQualitySheet() async {
     _showControls();
     final List<MapEntry<String, StreamQuality>> qualities = _availableQualities;
+    final bool hasQualities = qualities.isNotEmpty;
 
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
-        return _PlayerSheetScaffold(
-          child: _PlayerOptionSheet(
-            title: 'Quality',
-            onBack: () => Navigator.of(context).pop(),
-            footer: _PlayerToggleRow(
-              title: 'Automatic quality',
-              subtitle:
-                  'Use the source default unless you explicitly select a stream quality.',
-              value: _selectedQualityKey == null,
-              onChanged: (bool value) {
-                Navigator.of(context).pop();
-                if (value) {
-                  _selectQuality(null);
-                }
-              },
-            ),
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: qualities.length,
-              itemBuilder: (BuildContext context, int index) {
-                final MapEntry<String, StreamQuality> quality =
-                    qualities[index];
-                final bool isSelected =
-                    _selectedQualityKey == quality.key ||
-                    (_selectedQualityKey == null &&
-                        widget.args.streamResult.stream.selectedQuality ==
-                            quality.key);
+        // Sheet stays open after selection; the tick on the picked row
+        // updates instantly via [setSheetState].
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setSheetState) {
+            return _PlayerSheetScaffold(
+              child: _PlayerOptionSheet(
+                title: 'Quality',
+                onBack: () => Navigator.of(context).pop(),
+                footer: hasQualities
+                    ? _PlayerToggleRow(
+                        title: 'Automatic quality',
+                        subtitle:
+                            'Use the source default unless you explicitly select a stream quality.',
+                        value: _selectedQualityKey == null,
+                        onChanged: (bool value) {
+                          if (value) {
+                            _selectQuality(null);
+                          }
+                          setSheetState(() {});
+                        },
+                      )
+                    : null,
+                child: hasQualities
+                    ? ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: qualities.length,
+                        itemBuilder: (BuildContext context, int index) {
+                          final MapEntry<String, StreamQuality> quality =
+                              qualities[index];
+                          final bool isSelected =
+                              _selectedQualityKey == quality.key ||
+                              (_selectedQualityKey == null &&
+                                  widget.args.streamResult.stream
+                                          .selectedQuality ==
+                                      quality.key);
 
-                return _PlayerOptionRow(
-                  title: quality.key,
-                  subtitle: quality.value.type,
-                  selected: isSelected,
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    _selectQuality(quality.key);
-                  },
-                );
-              },
-            ),
-          ),
+                          return _PlayerOptionRow(
+                            title: quality.key,
+                            subtitle: quality.value.type,
+                            selected: isSelected,
+                            onTap: () {
+                              _selectQuality(quality.key);
+                              setSheetState(() {});
+                            },
+                          );
+                        },
+                      )
+                    : const Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: AppSpacing.x4,
+                          vertical: AppSpacing.x6,
+                        ),
+                        child: Text(
+                          'This source did not expose multiple stream qualities. '
+                          'The player is using the source default.',
+                          textAlign: TextAlign.left,
+                          style: TextStyle(color: AppColors.typeSecondary),
+                        ),
+                      ),
+              ),
+            );
+          },
         );
       },
     );
@@ -852,104 +981,116 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _openSubtitlesSheet() async {
     _showControls();
-    final Map<String, List<StreamCaption>> groupedCaptions =
-        _groupedCaptionsByLanguage;
 
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
-        return _PlayerSheetScaffold(
-          child: _PlayerOptionSheet(
-            title: 'Subtitles',
-            trailingText: 'Customize',
-            onBack: () => Navigator.of(context).pop(),
-            onTrailingTap: () {
-              Navigator.of(context).pop();
-              unawaited(_openCustomizeSubtitlesSheet());
-            },
-            child: ListView(
-              shrinkWrap: true,
-              children: <Widget>[
-                _PlayerOptionRow(
-                  title: 'Off',
-                  selected: !_subtitlesEnabled,
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    _disableSubtitles();
-                  },
+        // Sheet stays open across selections — picking Off / Auto / a
+        // language only flips the tick; "leaf" actions (file, paste,
+        // transcript, online search, customize) layer sub-sheets on top so
+        // back returns here.
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setSheetState) {
+            final Map<String, List<StreamCaption>> groupedCaptions =
+                _groupedCaptionsByLanguage;
+            return _PlayerSheetScaffold(
+              child: _PlayerOptionSheet(
+                title: 'Subtitles',
+                trailingText: 'Customize',
+                onBack: () => Navigator.of(context).pop(),
+                onTrailingTap: () async {
+                  await _openCustomizeSubtitlesSheet();
+                  setSheetState(() {});
+                },
+                child: ListView(
+                  shrinkWrap: true,
+                  children: <Widget>[
+                    _PlayerOptionRow(
+                      title: 'Off',
+                      selected: !_subtitlesEnabled,
+                      onTap: () {
+                        _disableSubtitles();
+                        setSheetState(() {});
+                      },
+                    ),
+                    _PlayerOptionRow(
+                      title: 'Auto select',
+                      subtitle:
+                          'Tap again to auto select a different subtitle',
+                      selected: _subtitlesEnabled && _selectedCaption == null,
+                      onTap: () {
+                        _enableAutoSubtitles();
+                        setSheetState(() {});
+                      },
+                    ),
+                    _PlayerOptionRow(
+                      title: 'Drop or upload file',
+                      subtitle: '.srt or .vtt from this device',
+                      showChevron: true,
+                      onTap: () async {
+                        await _pickSubtitleFile();
+                        setSheetState(() {});
+                      },
+                    ),
+                    _PlayerOptionRow(
+                      title: 'Paste subtitle data',
+                      subtitle: 'Paste raw VTT or SRT text',
+                      showChevron: true,
+                      onTap: () async {
+                        await _openPasteSubtitleSheet();
+                        setSheetState(() {});
+                      },
+                    ),
+                    _PlayerOptionRow(
+                      title: 'Transcript',
+                      subtitle: _selectedCaption != null
+                          ? 'Read the active track as text'
+                          : 'Pick a subtitle first to read its transcript',
+                      showChevron: true,
+                      onTap: () async {
+                        if (_selectedCaption?.url?.isNotEmpty == true) {
+                          await _openTranscriptSheet(_selectedCaption!);
+                        } else {
+                          _setSubtitleState(
+                            enabled: _subtitlesEnabled,
+                            message:
+                                'Pick a subtitle track first to read transcript.',
+                          );
+                        }
+                        setSheetState(() {});
+                      },
+                    ),
+                    if (AppConfig.hasWyzieApiKey ||
+                        AppConfig.hasOpensubtitlesApiKey)
+                      _PlayerOptionRow(
+                        title: 'Search online…',
+                        subtitle: 'Wyzie & OpenSubtitles',
+                        showChevron: true,
+                        onTap: () async {
+                          await _openOnlineSubtitlesPicker();
+                          setSheetState(() {});
+                        },
+                      ),
+                    for (final MapEntry<String, List<StreamCaption>> entry
+                        in groupedCaptions.entries)
+                      _PlayerLanguageRow(
+                        flag: _flagForLanguage(_languageCodeFor(entry.value)),
+                        name: entry.key,
+                        count: entry.value.length,
+                        selected: _selectedCaption != null &&
+                            entry.value.contains(_selectedCaption),
+                        onTap: () async {
+                          await _openSubtitleLanguageSheet(
+                            entry.key,
+                            entry.value,
+                          );
+                          setSheetState(() {});
+                        },
+                      ),
+                  ],
                 ),
-                _PlayerOptionRow(
-                  title: 'Auto select',
-                  subtitle: 'Tap again to auto select a different subtitle',
-                  selected: _subtitlesEnabled && _selectedCaption == null,
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    _enableAutoSubtitles();
-                  },
-                ),
-                _PlayerOptionRow(
-                  title: 'Drop or upload file',
-                  subtitle: '.srt or .vtt from this device',
-                  showChevron: true,
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    unawaited(_pickSubtitleFile());
-                  },
-                ),
-                _PlayerOptionRow(
-                  title: 'Paste subtitle data',
-                  subtitle: 'Paste raw VTT or SRT text',
-                  showChevron: true,
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    unawaited(_openPasteSubtitleSheet());
-                  },
-                ),
-                _PlayerOptionRow(
-                  title: 'Transcript',
-                  subtitle: _selectedCaption != null
-                      ? 'Read the active track as text'
-                      : 'Pick a subtitle first to read its transcript',
-                  showChevron: true,
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    if (_selectedCaption?.url?.isNotEmpty == true) {
-                      unawaited(_openTranscriptSheet(_selectedCaption!));
-                    } else {
-                      _setSubtitleState(
-                        enabled: _subtitlesEnabled,
-                        message:
-                            'Pick a subtitle track first to read transcript.',
-                      );
-                    }
-                  },
-                ),
-                if (AppConfig.hasWyzieApiKey ||
-                    AppConfig.hasOpensubtitlesApiKey)
-                  _PlayerOptionRow(
-                    title: 'Search online…',
-                    subtitle: 'Wyzie & OpenSubtitles',
-                    showChevron: true,
-                    onTap: () {
-                      Navigator.of(context).pop();
-                      unawaited(_openOnlineSubtitlesPicker());
-                    },
-                  ),
-                for (final MapEntry<String, List<StreamCaption>> entry
-                    in groupedCaptions.entries)
-                  _PlayerLanguageRow(
-                    flag: _flagForLanguage(_languageCodeFor(entry.value)),
-                    name: entry.key,
-                    count: entry.value.length,
-                    selected: _selectedCaption != null &&
-                        entry.value.contains(_selectedCaption),
-                    onTap: () {
-                      Navigator.of(context).pop();
-                      _openSubtitleLanguageSheet(entry.key, entry.value);
-                    },
-                  ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
@@ -961,35 +1102,39 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   ) async {
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
-        return _PlayerSheetScaffold(
-          child: _PlayerOptionSheet(
-            title: language,
-            trailingText: 'Customize',
-            onBack: () => Navigator.of(context).pop(),
-            onTrailingTap: () {
-              Navigator.of(context).pop();
-              unawaited(_openCustomizeSubtitlesSheet());
-            },
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: captions.length,
-              itemBuilder: (BuildContext context, int index) {
-                final StreamCaption caption = captions[index];
-                final bool isSelected = caption == _selectedCaption;
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setSheetState) {
+            return _PlayerSheetScaffold(
+              child: _PlayerOptionSheet(
+                title: language,
+                trailingText: 'Customize',
+                onBack: () => Navigator.of(context).pop(),
+                onTrailingTap: () async {
+                  await _openCustomizeSubtitlesSheet();
+                  setSheetState(() {});
+                },
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: captions.length,
+                  itemBuilder: (BuildContext context, int index) {
+                    final StreamCaption caption = captions[index];
+                    final bool isSelected = caption == _selectedCaption;
 
-                return _PlayerCaptionRow(
-                  caption: caption,
-                  selected: isSelected,
-                  flag: _flagForLanguage(caption.language),
-                  hearingImpaired: _isHearingImpaired(caption),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    _selectCaption(caption);
+                    return _PlayerCaptionRow(
+                      caption: caption,
+                      selected: isSelected,
+                      flag: _flagForLanguage(caption.language),
+                      hearingImpaired: _isHearingImpaired(caption),
+                      onTap: () {
+                        _selectCaption(caption);
+                        setSheetState(() {});
+                      },
+                    );
                   },
-                );
-              },
-            ),
-          ),
+                ),
+              ),
+            );
+          },
         );
       },
     );
@@ -1392,6 +1537,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _handleScreenTap() {
+    // Locked: ignore taps. Only the unlock pill (top-right) re-enables UI.
+    if (_controlsLocked) {
+      return;
+    }
     setState(() {
       _controlsVisible = !_controlsVisible;
     });
@@ -1400,6 +1549,59 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     } else {
       _controlsHideTimer?.cancel();
     }
+  }
+
+  /// Double-tap left side → seek backwards, right side → forwards. Distance
+  /// reads from [LocalStorage.getDoubleTapSeekSecs] (5/10/15/30/60).
+  void _handleDoubleTapDown(TapDownDetails details) {
+    if (_controlsLocked || !_playerReady) {
+      return;
+    }
+    final double width = MediaQuery.sizeOf(context).width;
+    if (width <= 0) {
+      return;
+    }
+    final double x = details.globalPosition.dx;
+    final int seekSecs = LocalStorage.getDoubleTapSeekSecs();
+    // Center 30% is a dead zone so accidental double-taps near the play
+    // button don't seek either direction.
+    final double thirdLeft = width * 0.35;
+    final double thirdRight = width * 0.65;
+    if (x < thirdLeft) {
+      unawaited(_seekRelative(-seekSecs));
+      _flashGestureHint(
+        icon: _doubleTapSeekIcon(-seekSecs),
+        label: '-${seekSecs}s',
+      );
+    } else if (x > thirdRight) {
+      unawaited(_seekRelative(seekSecs));
+      _flashGestureHint(
+        icon: _doubleTapSeekIcon(seekSecs),
+        label: '+${seekSecs}s',
+      );
+    }
+  }
+
+  /// Material numbered skip icons only exist for 5/10/15/30/60 — never mix a
+  /// hardcoded glyph (e.g. forward_30) with a different configured interval.
+  static IconData _doubleTapSeekIcon(int signedSecs) {
+    final int s = signedSecs.abs();
+    // Only 5 / 10 / 30 have matching Material *rounded* replay/forward glyphs in
+    // all SDKs; 15 / 60 fall back to generic skip icons.
+    if (signedSecs < 0) {
+      return switch (s) {
+        5 => Icons.replay_5_rounded,
+        10 => Icons.replay_10_rounded,
+        30 => Icons.replay_30_rounded,
+        _ => Icons.fast_rewind_rounded,
+      };
+    }
+    return switch (s) {
+      5 => Icons.forward_5_rounded,
+      10 => Icons.forward_10_rounded,
+      30 => Icons.forward_30_rounded,
+      _ => Icons.fast_forward_rounded,
+    };
   }
 
   Future<void> _primeScreenBrightness() async {
@@ -1433,6 +1635,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _onVerticalDragStart(DragStartDetails details) {
+    // Locked: no brightness/volume edge-swipe gestures either.
+    if (_controlsLocked) {
+      _edgeSwipe = _PlayerEdgeSwipe.none;
+      return;
+    }
     final MediaQueryData mq = MediaQuery.of(context);
     final double width = mq.size.width - mq.padding.left - mq.padding.right;
     if (width <= 0) {
@@ -1793,16 +2000,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
     return PopScope(
       canPop: true,
-      onPopInvokedWithResult: (bool didPop, Object? result) {
-        if (didPop) {
-          unawaited(_persistProgress());
-        }
-      },
       child: Scaffold(
         backgroundColor: AppColors.blackC50,
         body: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: _handleScreenTap,
+          onDoubleTapDown: _handleDoubleTapDown,
+          // [onDoubleTap] required so the framework actually waits for a
+          // potential second tap before firing onTap (slight delay) instead
+          // of dropping our [onDoubleTapDown] handler.
+          onDoubleTap: () {},
           onVerticalDragStart: _onVerticalDragStart,
           onVerticalDragUpdate: (DragUpdateDetails details) {
             unawaited(_onVerticalDragUpdate(details));
@@ -1947,14 +2154,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     ),
                   ),
                 PlayerControls(
-                  visible: _controlsVisible,
+                  visible: _controlsVisible && !_controlsLocked,
                   mediaTitle: title,
                   sourceLabel:
                       widget.args.streamResult.embedName ??
                       widget.args.streamResult.sourceName,
-                  qualityLabel: _currentQualityLabel,
-                  subtitleLabel: _currentSubtitleLabel,
-                  volumeLabel: '${_softwareVolume.round()}',
                   isPlaying: _playing,
                   position: _position,
                   duration: _duration,
@@ -1976,9 +2180,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   onOpenSettings: _openPlayerSettingsSheet,
                   onOpenBrightness: _openBrightnessSheet,
                   onOpenVolume: _openVolumeSheet,
-                  onFullscreen: _applyPlayerChrome,
+                  autoRotate: !_landscapeLocked,
+                  onToggleAutoRotate: _toggleAutoRotate,
+                  onLock: _lockControls,
                   onNextEpisode: _playNextEpisode,
                 ),
+                if (_controlsLocked)
+                  Positioned(
+                    top: AppSpacing.x4,
+                    right: AppSpacing.x4,
+                    child: SafeArea(
+                      child: _LockedUnlockPill(onUnlock: _unlockControls),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -2043,12 +2257,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return _selectedCaption?.label ??
         _selectedCaption?.language ??
         (_availableCaptions.isNotEmpty ? 'Auto' : 'Embedded');
-  }
-
-  String get _currentAudioLabel {
-    return widget.args.streamResult.stream.playbackType ??
-        widget.args.streamResult.embedName ??
-        'Default';
   }
 
   Future<void> _applySelectedSubtitleTrack() async {
@@ -2328,36 +2536,28 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
     required this.qualityLabel,
     required this.sourceLabel,
     required this.subtitleLabel,
-    required this.audioLabel,
-    required this.subtitlesEnabled,
-    required this.subtitlesAvailable,
     required this.onQualityTap,
     required this.onSourceTap,
     required this.onSubtitlesTap,
-    required this.onSubtitleToggle,
   });
 
   final String qualityLabel;
   final String sourceLabel;
   final String subtitleLabel;
-  final String audioLabel;
-  final bool subtitlesEnabled;
-  final bool subtitlesAvailable;
   final VoidCallback onQualityTap;
   final VoidCallback onSourceTap;
   final VoidCallback onSubtitlesTap;
-  final ValueChanged<bool> onSubtitleToggle;
 
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(AppSpacing.x4),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        // [stretch] so the lone Subtitles card fills the full sheet width.
+        // Row children already fill internally, coming-soon tiles too.
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          // True 2x2 grid (web parity). Two equal columns by Row+Expanded so
-          // narrow phones do not collapse into a 1-per-line stack like the
-          // old [Wrap] did, and so all four cards keep matching height.
+          // Two cards side-by-side: Quality + Source.
           Row(
             children: <Widget>[
               Expanded(
@@ -2378,27 +2578,16 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
             ],
           ),
           const SizedBox(height: AppSpacing.x3),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: _PlayerSettingsCard(
-                  title: 'Subtitles',
-                  subtitle: subtitleLabel,
-                  onTap: onSubtitlesTap,
-                ),
-              ),
-              const SizedBox(width: AppSpacing.x3),
-              Expanded(
-                child:
-                    _PlayerSettingsCard(title: 'Audio', subtitle: audioLabel),
-              ),
-            ],
+          // Subtitles spans full width — replaces the old 2x2 layout that
+          // also held a non-clickable "Audio" tile (always HLS).
+          _PlayerSettingsCard(
+            title: 'Subtitles',
+            subtitle: subtitleLabel,
+            onTap: onSubtitlesTap,
           ),
           const SizedBox(height: AppSpacing.x4),
-          // Web-parity rows (Download / Watch Party). Surfaced as
-          // coming-soon entries so visual parity is preserved without
-          // shipping a half-baked feature inside this aggregator-only
-          // build.
+          // Web-parity rows (Download / Watch Party) kept as coming-soon
+          // affordances so users know the feature surface exists.
           const _PlayerComingSoonTile(
             icon: Icons.download_rounded,
             title: 'Download',
@@ -2408,29 +2597,10 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
             icon: Icons.podcasts_rounded,
             title: 'Watch Party',
           ),
-          const SizedBox(height: AppSpacing.x4),
-          const Divider(color: AppColors.utilsDivider, height: AppSpacing.x0),
-          const SizedBox(height: AppSpacing.x4),
-          _PlayerToggleRow(
-            title: 'Enable subtitles',
-            subtitle: subtitlesAvailable
-                ? 'Use auto select or choose a language-specific track.'
-                : 'No subtitle tracks are available for this stream.',
-            value: subtitlesEnabled,
-            enabled: subtitlesAvailable,
-            onChanged: onSubtitleToggle,
-          ),
-          const SizedBox(height: AppSpacing.x3),
-          const _PlayerInlineInfoRow(
-            title: 'Playback settings',
-            subtitle:
-                'Quality, source, subtitles, and stream-specific options.',
-          ),
           const SizedBox(height: AppSpacing.x3),
           const _PlayerComingSoonTile(
             icon: Icons.skip_next_rounded,
             title: 'Skip Segments',
-            inlineChevron: true,
           ),
         ],
       ),
@@ -2442,15 +2612,10 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
 /// match web parity (Download, Watch Party, Skip Segments) but are gated to
 /// a later milestone in this aggregator build.
 class _PlayerComingSoonTile extends StatelessWidget {
-  const _PlayerComingSoonTile({
-    required this.icon,
-    required this.title,
-    this.inlineChevron = false,
-  });
+  const _PlayerComingSoonTile({required this.icon, required this.title});
 
   final IconData icon;
   final String title;
-  final bool inlineChevron;
 
   @override
   Widget build(BuildContext context) {
@@ -2472,14 +2637,6 @@ class _PlayerComingSoonTile extends StatelessWidget {
                   color: AppColors.typeSecondary,
                 ),
           ),
-          if (inlineChevron)
-            const Padding(
-              padding: EdgeInsets.only(left: AppSpacing.x2),
-              child: Icon(
-                Icons.chevron_right_rounded,
-                color: AppColors.typeSecondary,
-              ),
-            ),
         ],
       ),
     );
@@ -3086,14 +3243,13 @@ class _PlayerToggleRow extends StatelessWidget {
     required this.subtitle,
     required this.value,
     required this.onChanged,
-    this.enabled = true,
   });
 
   final String title;
   final String subtitle;
   final bool value;
   final ValueChanged<bool> onChanged;
-  final bool enabled;
+  static const bool enabled = true;
 
   @override
   Widget build(BuildContext context) {
@@ -3117,33 +3273,24 @@ class _PlayerToggleRow extends StatelessWidget {
           ),
         ),
         const SizedBox(width: AppSpacing.x3),
-        Switch(value: value, onChanged: enabled ? onChanged : null),
-      ],
-    );
-  }
-}
-
-class _PlayerInlineInfoRow extends StatelessWidget {
-  const _PlayerInlineInfoRow({required this.title, required this.subtitle});
-
-  final String title;
-  final String subtitle;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: <Widget>[
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(title, style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: AppSpacing.x1),
-              Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
-            ],
+        // Pin off-state colors so the pill is grey when off (Material 3
+        // defaults give a purple thumb on dark backgrounds).
+        Switch(
+          value: value,
+          onChanged: enabled ? onChanged : null,
+          activeThumbColor: AppColors.typeEmphasis,
+          activeTrackColor: AppColors.buttonsPurple,
+          inactiveThumbColor: AppColors.typeSecondary,
+          inactiveTrackColor: AppColors.dropdownBorder,
+          trackOutlineColor: WidgetStateProperty.resolveWith<Color?>(
+            (Set<WidgetState> states) {
+              if (states.contains(WidgetState.selected)) {
+                return AppColors.buttonsPurple;
+              }
+              return AppColors.dropdownBorder;
+            },
           ),
         ),
-        const Icon(Icons.chevron_right_rounded, color: AppColors.typeSecondary),
       ],
     );
   }
@@ -3571,4 +3718,55 @@ class _TranscriptCue {
 
   final String timestamp;
   final String text;
+}
+
+/// Small floating pill shown when the player is locked. The only affordance
+/// while the controls are hidden — tap to restore the full overlay. Kept
+/// light (no [BackdropFilter] blur) so it doesn't tax the GPU on top of the
+/// active video frame.
+class _LockedUnlockPill extends StatelessWidget {
+  const _LockedUnlockPill({required this.onUnlock});
+
+  final VoidCallback onUnlock;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.transparent,
+      child: InkWell(
+        onTap: onUnlock,
+        borderRadius: BorderRadius.circular(AppSpacing.x10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.x3,
+            vertical: AppSpacing.x2,
+          ),
+          decoration: BoxDecoration(
+            color: AppColors.blackC50.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(AppSpacing.x10),
+            border: Border.all(
+              color: AppColors.videoContextBorder.withValues(alpha: 0.6),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Icon(
+                Icons.lock_rounded,
+                size: AppSpacing.x4,
+                color: AppColors.typeEmphasis,
+              ),
+              const SizedBox(width: AppSpacing.x2),
+              Text(
+                'Tap to unlock',
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: AppColors.typeEmphasis,
+                    ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

@@ -146,11 +146,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
           onError: _handleError,
           onDone: () {
             if (!_hasSuccess() && mounted) {
-              setState(() {
-                _isLoading = false;
-                _allFailure = true;
-                _failureMessage ??= 'No sources found';
-              });
+              _handleFailure(_failureMessage ?? 'No sources found');
             }
           },
         );
@@ -197,6 +193,9 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
     final StreamResult? result = event.result;
     if (event.ok && result != null) {
+      // Server runs sources in order — anything before the winner was tried
+      // and didn't produce a stream, so mark them as failure (red X).
+      _markPrecedingSourcesFailed(result.sourceId);
       _updateStatus(result.sourceId, ScrapeStatus.success);
       if (result.embedId != null) {
         _updateStatus(result.embedId!, ScrapeStatus.success);
@@ -206,6 +205,22 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     }
 
     _handleFailure(event.errorMessage ?? 'No sources found');
+  }
+
+  /// Set every source ordered before [winnerId] to [ScrapeStatus.failure]
+  /// unless it already resolved to a non-waiting state.
+  void _markPrecedingSourcesFailed(String winnerId) {
+    final List<String> ordered = _orderedSourceIdsForUi();
+    for (final String id in ordered) {
+      if (id == winnerId) {
+        return;
+      }
+      final ScrapeStatus current = _statuses[id] ?? ScrapeStatus.waiting;
+      if (current == ScrapeStatus.success) {
+        continue;
+      }
+      _statuses[id] = ScrapeStatus.failure;
+    }
   }
 
   void _handleError(Object error, [StackTrace? stackTrace]) {
@@ -314,6 +329,19 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
           return;
         }
         setState(() {
+          // Visualise progress: as the rotation moves to the next provider,
+          // mark the one we just left as failure (red X) — providers run in
+          // order server-side, so by the time we move on the previous one
+          // has been "tried" and didn't yield a stream.
+          if (_rotateIndex >= 0 && _rotateIndex < ids.length) {
+            final String prevId = ids[_rotateIndex];
+            final ScrapeStatus current =
+                _statuses[prevId] ?? ScrapeStatus.waiting;
+            if (current == ScrapeStatus.waiting ||
+                current == ScrapeStatus.pending) {
+              _statuses[prevId] = ScrapeStatus.failure;
+            }
+          }
           _rotateIndex = (_rotateIndex + 1) % ids.length;
         });
       },
@@ -326,6 +354,21 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
   }
 
   ScrapeStatus _displayStatusForList(String id) {
+    // Active SSE-tracked source wins regardless of any failure mark — keeps
+    // the pending spinner on the slot the server says it's currently doing.
+    if (_currentPendingSourceId == id) {
+      return ScrapeStatus.pending;
+    }
+    // While the scrape is still running, the rotation pointer is the visual
+    // "currently checking" slot. It overrides a stale failure mark left by
+    // a previous full rotation cycle so the spinner doesn't get hidden by
+    // the cosmetic red-X we set when moving past a slot.
+    if (_awaitingScrapeResult) {
+      final List<String> ids = _orderedSourceIdsForUi();
+      if (ids.isNotEmpty && id == ids[_rotateIndex % ids.length]) {
+        return ScrapeStatus.pending;
+      }
+    }
     final ScrapeStatus real = _statuses[id] ?? ScrapeStatus.waiting;
     if (real == ScrapeStatus.success ||
         real == ScrapeStatus.failure ||
@@ -333,19 +376,10 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return real;
     }
     if (_allFailure) {
-      if (real == ScrapeStatus.waiting) {
+      if (real == ScrapeStatus.waiting || real == ScrapeStatus.pending) {
         return ScrapeStatus.failure;
       }
       return real;
-    }
-    if (_currentPendingSourceId == id) {
-      return ScrapeStatus.pending;
-    }
-    if (_awaitingScrapeResult) {
-      final List<String> ids = _orderedSourceIdsForUi();
-      if (ids.isNotEmpty && id == ids[_rotateIndex % ids.length]) {
-        return ScrapeStatus.pending;
-      }
     }
     return real;
   }

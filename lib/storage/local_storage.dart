@@ -1,3 +1,5 @@
+import 'dart:math' show max;
+
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/models/media_item.dart';
@@ -17,6 +19,10 @@ class LocalStorage {
   static const String prefKeySubtitleSize = 'pref_subtitle_size';
   static const String prefKeySubtitleColor = 'pref_subtitle_color';
   static const String prefKeySubtitleBgOpacity = 'pref_subtitle_bg_opacity';
+  static const String prefKeyDoubleTapSeekSecs = 'pref_double_tap_seek_secs';
+
+  static const int doubleTapSeekDefaultSecs = 10;
+  static const List<int> doubleTapSeekChoicesSecs = <int>[5, 10, 15, 30, 60];
 
   // Quality cap values
   static const String qualityCapAuto = 'auto';
@@ -46,13 +52,27 @@ class LocalStorage {
     MediaItem mediaItem,
   ) async {
     final DateTime now = DateTime.now().toUtc();
-    final double watchedRatio = durationSecs > 0
-        ? positionSecs / durationSecs
-        : 0;
+    final Map<String, dynamic>? existing = getProgress(mediaKey);
+    final int prevDurationSecs = _readInt(existing?['durationSecs']);
+
+    // HLS/DASH often reports a tiny or partial duration before the full run
+    // is known. If we persist watchedRatio = position/duration in that window,
+    // ratio hits ~1.0 and the title vanishes from Continue Watching.
+    final bool durationSuspicious =
+        durationSecs > 0 && positionSecs > durationSecs;
+    final int storedDurationSecs = durationSuspicious
+        ? max(prevDurationSecs, positionSecs + 1)
+        : durationSecs;
+    final double watchedRatio = durationSecs <= 0
+        ? 0
+        : durationSuspicious
+            ? 0
+            : (positionSecs / durationSecs).clamp(0.0, 1.0);
+
     final Map<String, dynamic> progressEntry = <String, dynamic>{
       'mediaKey': mediaKey,
       'positionSecs': positionSecs,
-      'durationSecs': durationSecs,
+      'durationSecs': storedDurationSecs,
       'watchedRatio': watchedRatio,
       'updatedAt': now.toIso8601String(),
       'media': _mediaToMap(mediaItem),
@@ -60,7 +80,7 @@ class LocalStorage {
 
     await _progressBox.put(mediaKey, progressEntry);
 
-    if (durationSecs > 0 && watchedRatio >= _historyRatioThreshold) {
+    if (storedDurationSecs > 0 && watchedRatio >= _historyRatioThreshold) {
       await _watchHistoryBox.put(mediaKey, <String, dynamic>{
         'mediaKey': mediaKey,
         'watchedAt': now.toIso8601String(),
@@ -83,7 +103,13 @@ class LocalStorage {
         .map((Map<dynamic, dynamic> value) => Map<String, dynamic>.from(value))
         .where((Map<String, dynamic> item) {
           final double ratio = _readDouble(item['watchedRatio']);
-          return ratio >= 0.03 && ratio <= AppConfig.watchedRatio;
+          final int positionSecs = item['positionSecs'] is num
+              ? (item['positionSecs'] as num).toInt()
+              : 0;
+          // Any saved progress with at least a few seconds of playback and
+          // not yet finished. Earlier ratio gate (3%) was too aggressive —
+          // a 30-min episode needed ~54s before showing up here.
+          return positionSecs >= 5 && ratio < AppConfig.watchedRatio;
         })
         .toList();
 
@@ -93,7 +119,33 @@ class LocalStorage {
       ).compareTo(_readDateTime(a['updatedAt']));
     });
 
-    return items;
+    // Collapse multiple episode entries down to a single card per show
+    // (movies are already 1:1). Keeps the latest entry — list above is
+    // sorted by [updatedAt] desc so the first occurrence per show wins.
+    final Map<String, Map<String, dynamic>> latestPerShow =
+        <String, Map<String, dynamic>>{};
+    for (final Map<String, dynamic> item in items) {
+      final String groupKey = _showGroupKey(item);
+      latestPerShow.putIfAbsent(groupKey, () => item);
+    }
+    return latestPerShow.values.toList(growable: false);
+  }
+
+  /// Group key for Continue Watching de-dup: show-level (`type-tmdbId`) for
+  /// TV so all episodes of one series collapse, otherwise the entry's own
+  /// `mediaKey`. Uses the stored `media` blob so we don't need to rebuild a
+  /// [MediaItem] just to read `hiveKey()`.
+  static String _showGroupKey(Map<String, dynamic> item) {
+    final dynamic mediaRaw = item['media'];
+    if (mediaRaw is Map) {
+      final Map<String, dynamic> media = Map<String, dynamic>.from(mediaRaw);
+      final String type = '${media['type'] ?? ''}';
+      final dynamic tmdbId = media['tmdbId'] ?? media['id'];
+      if (type.isNotEmpty && tmdbId != null) {
+        return '$type-$tmdbId';
+      }
+    }
+    return '${item['mediaKey'] ?? ''}';
   }
 
   static Future<bool> toggleBookmark(MediaItem mediaItem) async {
@@ -291,6 +343,24 @@ class LocalStorage {
       prefKeySubtitleBgOpacity,
       value.clamp(0.0, 1.0),
     );
+  }
+
+  /// Seek interval (in seconds) when the user double-taps the player. Stored
+  /// as an int so the picker in Settings round-trips cleanly. Falls back to
+  /// [doubleTapSeekDefaultSecs] when unset or out of range.
+  static int getDoubleTapSeekSecs() {
+    final dynamic raw = _prefsBox.get(prefKeyDoubleTapSeekSecs);
+    if (raw is int && doubleTapSeekChoicesSecs.contains(raw)) {
+      return raw;
+    }
+    return doubleTapSeekDefaultSecs;
+  }
+
+  static Future<void> setDoubleTapSeekSecs(int value) async {
+    final int safe = doubleTapSeekChoicesSecs.contains(value)
+        ? value
+        : doubleTapSeekDefaultSecs;
+    await _prefsBox.put(prefKeyDoubleTapSeekSecs, safe);
   }
 
   /// Aggregate watch statistics derived from existing boxes; no extra Hive

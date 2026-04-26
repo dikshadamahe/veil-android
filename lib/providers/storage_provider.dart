@@ -109,6 +109,11 @@ final subtitleBgOpacityPrefProvider = Provider<double>((Ref ref) {
   return LocalStorage.getSubtitleBgOpacity();
 });
 
+final doubleTapSeekSecsPrefProvider = Provider<int>((Ref ref) {
+  ref.watch(storageRevisionProvider);
+  return LocalStorage.getDoubleTapSeekSecs();
+});
+
 final storageControllerProvider = Provider<StorageController>((Ref ref) {
   return StorageController(ref);
 });
@@ -163,6 +168,11 @@ class StorageController {
 
   Future<void> setSubtitleBgOpacity(double value) async {
     await LocalStorage.setSubtitleBgOpacity(value);
+    _refresh();
+  }
+
+  Future<void> setDoubleTapSeekSecs(int value) async {
+    await LocalStorage.setDoubleTapSeekSecs(value);
     _refresh();
   }
 

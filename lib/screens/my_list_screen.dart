@@ -6,6 +6,7 @@ import 'package:pstream_android/config/breakpoints.dart';
 import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/widgets/category_row.dart';
+import 'package:pstream_android/widgets/media_card.dart';
 
 /// Bookmarks + continue watching (Figma “download” → My list; no downloads).
 class MyListScreen extends ConsumerWidget {
@@ -62,6 +63,7 @@ class MyListScreen extends ConsumerWidget {
                         title: 'Continue watching',
                         items: continueWatching,
                         useSectionAccent: true,
+                        cardBehavior: MediaCardBehavior.continueWatching,
                         onSeeAll: () => context.go('/'),
                       ),
                     ),

@@ -10,9 +10,6 @@ class PlayerControls extends StatelessWidget {
     required this.visible,
     required this.mediaTitle,
     required this.sourceLabel,
-    required this.qualityLabel,
-    required this.subtitleLabel,
-    required this.volumeLabel,
     required this.isPlaying,
     required this.position,
     required this.duration,
@@ -26,7 +23,9 @@ class PlayerControls extends StatelessWidget {
     required this.onOpenSettings,
     required this.onOpenBrightness,
     required this.onOpenVolume,
-    required this.onFullscreen,
+    required this.autoRotate,
+    required this.onToggleAutoRotate,
+    required this.onLock,
     required this.onNextEpisode,
     this.nextEpisodeLabel,
   });
@@ -34,9 +33,6 @@ class PlayerControls extends StatelessWidget {
   final bool visible;
   final String mediaTitle;
   final String sourceLabel;
-  final String qualityLabel;
-  final String subtitleLabel;
-  final String volumeLabel;
   final bool isPlaying;
   final Duration position;
   final Duration duration;
@@ -50,7 +46,11 @@ class PlayerControls extends StatelessWidget {
   final Future<void> Function() onOpenSettings;
   final Future<void> Function() onOpenBrightness;
   final Future<void> Function() onOpenVolume;
-  final Future<void> Function() onFullscreen;
+  /// True when player allows free auto-rotate; false when locked to landscape.
+  final bool autoRotate;
+  final Future<void> Function() onToggleAutoRotate;
+  /// Hide all controls and ignore taps until the user taps the unlock pill.
+  final VoidCallback onLock;
   final Future<void> Function() onNextEpisode;
   final String? nextEpisodeLabel;
 
@@ -97,13 +97,6 @@ class PlayerControls extends StatelessWidget {
                             ),
                           ],
                         ),
-                      ),
-                      IconButton(
-                        onPressed: () {
-                          onOpenSettings();
-                        },
-                        icon: const Icon(Icons.tune_rounded),
-                        tooltip: 'Playback settings',
                       ),
                     ],
                   ),
@@ -164,29 +157,6 @@ class PlayerControls extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
-                    Wrap(
-                      spacing: AppSpacing.x2,
-                      runSpacing: AppSpacing.x2,
-                      children: <Widget>[
-                        _InfoChip(
-                          icon: Icons.wifi_tethering_rounded,
-                          label: sourceLabel,
-                        ),
-                        _InfoChip(
-                          icon: Icons.high_quality_rounded,
-                          label: qualityLabel,
-                        ),
-                        _InfoChip(
-                          icon: Icons.subtitles_rounded,
-                          label: subtitleLabel,
-                        ),
-                        _InfoChip(
-                          icon: Icons.volume_up_rounded,
-                          label: volumeLabel,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: AppSpacing.x3),
                     if (showNextEpisode)
                       Padding(
                         padding: const EdgeInsets.only(bottom: AppSpacing.x3),
@@ -248,10 +218,23 @@ class PlayerControls extends StatelessWidget {
                               ),
                               IconButton(
                                 onPressed: () {
-                                  onFullscreen();
+                                  onToggleAutoRotate();
                                 },
-                                icon: const Icon(Icons.fullscreen_rounded),
-                                tooltip: 'Fullscreen',
+                                icon: Icon(
+                                  autoRotate
+                                      ? Icons.screen_rotation_rounded
+                                      : Icons.screen_lock_rotation_rounded,
+                                ),
+                                tooltip: autoRotate
+                                    ? 'Lock landscape'
+                                    : 'Auto-rotate',
+                              ),
+                              IconButton(
+                                onPressed: onLock,
+                                icon: const Icon(
+                                  Icons.lock_outline_rounded,
+                                ),
+                                tooltip: 'Lock controls',
                               ),
                             ],
                           ),
@@ -292,42 +275,6 @@ class PlayerInfoPill extends StatelessWidget {
     return _GlassContainer(
       borderRadius: BorderRadius.circular(AppSpacing.x10),
       child: Text(label, style: Theme.of(context).textTheme.labelLarge),
-    );
-  }
-}
-
-class _InfoChip extends StatelessWidget {
-  const _InfoChip({required this.icon, required this.label});
-
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return _GlassContainer(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AppSpacing.x3,
-        vertical: AppSpacing.x2,
-      ),
-      borderRadius: BorderRadius.circular(AppSpacing.x10),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Icon(icon, size: AppSpacing.x4, color: AppColors.typeSecondary),
-          const SizedBox(width: AppSpacing.x2),
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.sizeOf(context).width * 0.3,
-            ),
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelMedium,
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -479,19 +426,26 @@ class _GlassContainer extends StatelessWidget {
     final BorderRadius effectiveRadius =
         borderRadius ?? BorderRadius.circular(AppSpacing.x4);
 
-    return ClipRRect(
-      borderRadius: effectiveRadius,
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: AppSpacing.x5, sigmaY: AppSpacing.x5),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: AppColors.videoContextBackground.withValues(alpha: 0.62),
-            borderRadius: effectiveRadius,
-            border: Border.all(
-              color: AppColors.videoContextBorder.withValues(alpha: 0.7),
+    // [BackdropFilter] re-blurs every frame in its parent layer. Wrapping in
+    // [RepaintBoundary] turns the glass into its own layer so the blurred
+    // content is cached and only repainted when this glass's children change
+    // — large win when controls are visible while the video frame ticks.
+    return RepaintBoundary(
+      child: ClipRRect(
+        borderRadius: effectiveRadius,
+        child: BackdropFilter(
+          filter:
+              ImageFilter.blur(sigmaX: AppSpacing.x5, sigmaY: AppSpacing.x5),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: AppColors.videoContextBackground.withValues(alpha: 0.62),
+              borderRadius: effectiveRadius,
+              border: Border.all(
+                color: AppColors.videoContextBorder.withValues(alpha: 0.7),
+              ),
             ),
+            child: Padding(padding: padding, child: child),
           ),
-          child: Padding(padding: padding, child: child),
         ),
       ),
     );

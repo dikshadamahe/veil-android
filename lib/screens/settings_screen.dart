@@ -133,6 +133,15 @@ class SettingsScreen extends ConsumerWidget {
                     },
                   ),
                   const SizedBox(height: AppSpacing.x3),
+                  _DoubleTapSeekTile(
+                    value: ref.watch(doubleTapSeekSecsPrefProvider),
+                    onPick: (int picked) async {
+                      await ref
+                          .read(storageControllerProvider)
+                          .setDoubleTapSeekSecs(picked);
+                    },
+                  ),
+                  const SizedBox(height: AppSpacing.x3),
                   _SettingsNavTile(
                     icon: Icons.insights_rounded,
                     title: 'Watch statistics',
@@ -558,6 +567,125 @@ class _QualityCapTile extends StatelessWidget {
   }
 }
 
+/// Picker tile for the player double-tap skip interval. Reads/writes via
+/// [storageControllerProvider]. Mirrors [_QualityCapTile] styling so the
+/// Playback section stays consistent.
+class _DoubleTapSeekTile extends StatelessWidget {
+  const _DoubleTapSeekTile({required this.value, required this.onPick});
+
+  final int value;
+  final ValueChanged<int> onPick;
+
+  Future<void> _open(BuildContext context) async {
+    final int? picked = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: AppColors.modalBackground,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.x4,
+              AppSpacing.x0,
+              AppSpacing.x4,
+              AppSpacing.x4,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Double-tap seek',
+                  style: Theme.of(sheetContext).textTheme.titleLarge,
+                ),
+                const SizedBox(height: AppSpacing.x1),
+                Text(
+                  'Distance to skip when you double-tap the player. Tap left side seeks back, right side seeks forward.',
+                  style: Theme.of(sheetContext).textTheme.bodySmall,
+                ),
+                const SizedBox(height: AppSpacing.x3),
+                RadioGroup<int>(
+                  groupValue: value,
+                  onChanged: (int? next) {
+                    if (next != null) {
+                      Navigator.of(sheetContext).pop(next);
+                    }
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      for (final int secs
+                          in LocalStorage.doubleTapSeekChoicesSecs)
+                        RadioListTile<int>(
+                          value: secs,
+                          title: Text('$secs seconds'),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (picked != null && picked != value) {
+      onPick(picked);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.blackC150,
+      borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
+        onTap: () => _open(context),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.x4,
+            vertical: AppSpacing.x4,
+          ),
+          child: Row(
+            children: <Widget>[
+              const Icon(
+                Icons.touch_app_rounded,
+                color: AppColors.typeLink,
+              ),
+              const SizedBox(width: AppSpacing.x3),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      'Double-tap seek',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: AppSpacing.x1),
+                    Text(
+                      '$value seconds per double-tap',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: AppColors.typeLink,
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.chevron_right_rounded,
+                color: AppColors.typeSecondary,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Inline switch row: persist whether subtitles auto-enable when a stream
 /// has caption tracks. Reads/writes via [storageControllerProvider].
 class _SubtitleDefaultTile extends StatelessWidget {
@@ -602,7 +730,25 @@ class _SubtitleDefaultTile extends StatelessWidget {
                   ],
                 ),
               ),
-              Switch(value: value, onChanged: onChanged),
+              Switch(
+                value: value,
+                onChanged: onChanged,
+                // Default Material 3 styling renders a purple thumb in the
+                // off position on dark backgrounds. Pin off-state colors so
+                // off looks neutral grey, on looks purple.
+                activeThumbColor: AppColors.typeEmphasis,
+                activeTrackColor: AppColors.buttonsPurple,
+                inactiveThumbColor: AppColors.typeSecondary,
+                inactiveTrackColor: AppColors.dropdownBorder,
+                trackOutlineColor: WidgetStateProperty.resolveWith<Color?>(
+                  (Set<WidgetState> states) {
+                    if (states.contains(WidgetState.selected)) {
+                      return AppColors.buttonsPurple;
+                    }
+                    return AppColors.dropdownBorder;
+                  },
+                ),
+              ),
             ],
           ),
         ),

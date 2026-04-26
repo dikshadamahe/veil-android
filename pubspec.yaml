@@ -30,10 +30,24 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  # Generates Android `mipmap-*/ic_launcher.png` + adaptive icon resources
+  # from a single source image (`logo-circle.png` in repo root).
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
   assets:
     - logo.png
+    - logo-circle.png
     - assets/logo1.png
     - assets/bg.png
+
+# Android-only launcher icon config. Re-run `dart run flutter_launcher_icons`
+# whenever `logo-circle.png` changes. The adaptive layer paints the same
+# circle on a dark background so all launcher mask shapes look intentional.
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "logo-circle.png"
+  adaptive_icon_background: "#0A0613"
+  adaptive_icon_foreground: "logo-circle.png"

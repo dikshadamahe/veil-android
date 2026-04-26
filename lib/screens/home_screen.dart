@@ -9,6 +9,7 @@ import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/tmdb_provider.dart';
 import 'package:pstream_android/widgets/category_row.dart';
+import 'package:pstream_android/widgets/media_card.dart';
 
 enum _HomeCatalogFilter { all, movies, tv }
 
@@ -20,15 +21,7 @@ class HomeScreen extends ConsumerStatefulWidget {
 }
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
-  final PageController _heroController = PageController();
-  int _heroPage = 0;
   _HomeCatalogFilter _catalogFilter = _HomeCatalogFilter.all;
-
-  @override
-  void dispose() {
-    _heroController.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -66,10 +59,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final AsyncValue<List<MediaItem>> popular = ref.watch(
       popularMoviesProvider,
     );
-    final List<MediaItem> continueWatching = ref.watch(
-      continueWatchingProvider,
+    final List<MediaItem> continueWatching = _filterByCatalog(
+      ref.watch(continueWatchingProvider),
     );
-    final List<MediaItem> bookmarks = ref.watch(bookmarksProvider);
+    final List<MediaItem> bookmarks = _filterByCatalog(
+      ref.watch(bookmarksProvider),
+    );
     final Object? error =
         trendingMovies.error ?? trendingTv.error ?? popular.error;
 
@@ -93,10 +88,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             children: <Widget>[
               Padding(
                 padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-                child: _HomeTopBar(
-                  layoutClass: layoutClass,
-                  onSearchTap: () => context.go('/search'),
-                ),
+                child: _HomeTopBar(layoutClass: layoutClass),
               ),
               SizedBox(
                 height: switch (layoutClass) {
@@ -111,7 +103,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   onSelected: (_HomeCatalogFilter next) {
                     setState(() {
                       _catalogFilter = next;
-                      _heroPage = 0;
                     });
                   },
                 ),
@@ -130,12 +121,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 if (heroCandidates.isNotEmpty) ...<Widget>[
                   RepaintBoundary(
                     child: _HomeHeroCarousel(
-                      controller: _heroController,
                       items: heroCandidates,
                       layoutClass: layoutClass,
                       horizontalPadding: horizontalPadding,
-                      pageIndex: _heroPage,
-                      onPageChanged: (int i) => setState(() => _heroPage = i),
                     ),
                   ),
                   const SizedBox(height: AppSpacing.x6),
@@ -145,6 +133,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     title: 'Continue watching',
                     items: continueWatching,
                     useSectionAccent: true,
+                    cardBehavior: MediaCardBehavior.continueWatching,
                     onSeeAll: () => context.go('/list'),
                   ),
                   const SizedBox(height: AppSpacing.x6),
@@ -203,6 +192,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
+  /// Apply the All / Movies / TV chip to a row of [items]. Keeps order stable.
+  List<MediaItem> _filterByCatalog(List<MediaItem> items) {
+    switch (_catalogFilter) {
+      case _HomeCatalogFilter.all:
+        return items;
+      case _HomeCatalogFilter.movies:
+        return items.where((MediaItem m) => m.isMovie).toList(growable: false);
+      case _HomeCatalogFilter.tv:
+        return items.where((MediaItem m) => m.isShow).toList(growable: false);
+    }
+  }
+
   List<MediaItem> _heroItems({
     required List<MediaItem> trendingMovies,
     required List<MediaItem> trendingTv,
@@ -223,10 +224,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 }
 
 class _HomeTopBar extends StatelessWidget {
-  const _HomeTopBar({required this.layoutClass, required this.onSearchTap});
+  const _HomeTopBar({required this.layoutClass});
 
   final WindowClass layoutClass;
-  final VoidCallback onSearchTap;
 
   @override
   Widget build(BuildContext context) {
@@ -243,41 +243,6 @@ class _HomeTopBar extends StatelessWidget {
           child: Align(
             alignment: Alignment.centerLeft,
             child: _HomeBrandMark(height: brandHeight),
-          ),
-        ),
-        Material(
-          color: AppColors.searchBackground,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppSpacing.x4),
-            side: const BorderSide(color: AppColors.dropdownBorder),
-          ),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(AppSpacing.x4),
-            onTap: onSearchTap,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AppSpacing.x3,
-                vertical: AppSpacing.x2,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  Icon(
-                    Icons.search_rounded,
-                    size: AppSpacing.x5,
-                    color: AppColors.searchIcon,
-                  ),
-                  const SizedBox(width: AppSpacing.x2),
-                  Text(
-                    'Search',
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                          color: AppColors.searchPlaceholder,
-                          fontWeight: FontWeight.w500,
-                        ),
-                  ),
-                ],
-              ),
-            ),
           ),
         ),
       ],
@@ -379,35 +344,69 @@ class _HomeCategoryChips extends StatelessWidget {
   }
 }
 
-class _HomeHeroCarousel extends StatelessWidget {
+/// Hero carousel owns its own [PageController] + page index so swiping
+/// between slides only rebuilds this widget — the rest of the home page
+/// (category rows, hero candidates, async providers) stays untouched.
+class _HomeHeroCarousel extends StatefulWidget {
   const _HomeHeroCarousel({
-    required this.controller,
     required this.items,
     required this.layoutClass,
     required this.horizontalPadding,
-    required this.pageIndex,
-    required this.onPageChanged,
   });
 
-  final PageController controller;
   final List<MediaItem> items;
   final WindowClass layoutClass;
   final double horizontalPadding;
-  final int pageIndex;
-  final ValueChanged<int> onPageChanged;
+
+  @override
+  State<_HomeHeroCarousel> createState() => _HomeHeroCarouselState();
+}
+
+class _HomeHeroCarouselState extends State<_HomeHeroCarousel> {
+  final PageController _controller = PageController();
+  int _pageIndex = 0;
+
+  @override
+  void didUpdateWidget(covariant _HomeHeroCarousel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_sameItems(oldWidget.items, widget.items)) {
+      _pageIndex = 0;
+      if (_controller.hasClients) {
+        _controller.jumpToPage(0);
+      }
+    }
+  }
+
+  static bool _sameItems(List<MediaItem> a, List<MediaItem> b) {
+    if (a.length != b.length) {
+      return false;
+    }
+    for (int i = 0; i < a.length; i++) {
+      if (a[i].tmdbId != b[i].tmdbId) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final double width =
-        MediaQuery.sizeOf(context).width - horizontalPadding * 2;
-    final double height = switch (layoutClass) {
+        MediaQuery.sizeOf(context).width - widget.horizontalPadding * 2;
+    final double height = switch (widget.layoutClass) {
       WindowClass.compact => width * 0.52,
       WindowClass.medium => width * 0.42,
       WindowClass.expanded => width * 0.36,
     };
 
     return Padding(
-      padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+      padding: EdgeInsets.symmetric(horizontal: widget.horizontalPadding),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
@@ -416,11 +415,11 @@ class _HomeHeroCarousel extends StatelessWidget {
             child: SizedBox(
               height: height,
               child: PageView.builder(
-                controller: controller,
-                onPageChanged: onPageChanged,
-                itemCount: items.length,
+                controller: _controller,
+                onPageChanged: (int i) => setState(() => _pageIndex = i),
+                itemCount: widget.items.length,
                 itemBuilder: (BuildContext context, int index) {
-                  return _HomeHeroSlide(media: items[index]);
+                  return _HomeHeroSlide(media: widget.items[index]);
                 },
               ),
             ),
@@ -428,8 +427,8 @@ class _HomeHeroCarousel extends StatelessWidget {
           const SizedBox(height: AppSpacing.x3),
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: List<Widget>.generate(items.length, (int i) {
-              final bool active = i == pageIndex;
+            children: List<Widget>.generate(widget.items.length, (int i) {
+              final bool active = i == _pageIndex;
               return Padding(
                 padding: const EdgeInsets.symmetric(horizontal: AppSpacing.x1),
                 child: AnimatedContainer(

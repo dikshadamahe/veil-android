@@ -8,27 +8,52 @@ import 'package:pstream_android/config/breakpoints.dart';
 import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/screens/detail_screen.dart';
+import 'package:pstream_android/screens/scraping_screen.dart';
 import 'package:shimmer/shimmer.dart';
+
+/// What happens when [MediaCard] is tapped. [detail] (default) opens the
+/// title's detail page; [continueWatching] skips detail and re-enters the
+/// scrape/play flow with the saved resume position.
+enum MediaCardBehavior { detail, continueWatching }
 
 class MediaCard extends ConsumerWidget {
   const MediaCard({
     super.key,
     required this.mediaItem,
     this.posterSize = 'w342',
+    this.behavior = MediaCardBehavior.detail,
   });
 
   final MediaItem mediaItem;
   final String posterSize;
+  final MediaCardBehavior behavior;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final _MediaCardSize size = _cardSize(context);
+
+    // For TV, show & progress live at the episode level. Look up the latest
+    // episode the user touched, then use that episode's progress so the
+    // Continue Watching tile (and progress bar) tracks "S{n}E{m}" instead
+    // of an always-empty show-level entry.
+    final LatestEpisodeSelection? latestEpisode = mediaItem.isShow
+        ? ref.watch(latestEpisodeSelectionProvider(mediaItem))
+        : null;
     final Map<String, dynamic>? progress = ref.watch(
-      progressEntryProvider(ProgressRequest(mediaItem: mediaItem)),
+      progressEntryProvider(
+        ProgressRequest(
+          mediaItem: mediaItem,
+          season: latestEpisode?.season,
+          episode: latestEpisode?.episode,
+        ),
+      ),
     );
     final double progressRatio = _progressRatio(progress);
     final bool showProgress = progressRatio >= 0.05 && progressRatio <= 0.90;
     final bool isBookmarked = ref.watch(bookmarkStatusProvider(mediaItem));
+    final String? episodeBadge = latestEpisode == null
+        ? null
+        : 'S${latestEpisode.season} E${latestEpisode.episode}';
 
     return RepaintBoundary(
       child: SizedBox(
@@ -45,6 +70,11 @@ class MediaCard extends ConsumerWidget {
             onTap: () async {
               await HapticFeedback.lightImpact();
               if (!context.mounted) {
+                return;
+              }
+
+              if (behavior == MediaCardBehavior.continueWatching) {
+                _continueWatchingTap(context, ref, latestEpisode, progress);
                 return;
               }
 
@@ -114,15 +144,37 @@ class MediaCard extends ConsumerWidget {
                           left: AppSpacing.x3,
                           right: AppSpacing.x3,
                           bottom: showProgress ? AppSpacing.x5 : AppSpacing.x3,
-                          child: Text(
-                            mediaItem.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleSmall
-                                ?.copyWith(
-                                  color: AppColors.typeEmphasis,
-                                  fontWeight: FontWeight.w700,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              Text(
+                                mediaItem.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.titleSmall
+                                    ?.copyWith(
+                                      color: AppColors.typeEmphasis,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                              if (episodeBadge != null) ...<Widget>[
+                                const SizedBox(height: AppSpacing.x1),
+                                Text(
+                                  episodeBadge,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .labelSmall
+                                      ?.copyWith(
+                                        color: AppColors.typeEmphasis
+                                            .withValues(alpha: 0.85),
+                                        fontWeight: FontWeight.w500,
+                                      ),
                                 ),
+                              ],
+                            ],
                           ),
                         ),
                         if (showProgress)
@@ -154,6 +206,44 @@ class MediaCard extends ConsumerWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Re-enter the scrape→player flow at the saved position. Movies use the
+  /// title's progress directly; TV uses [latestEpisode] season/episode and
+  /// that episode's progress. No detail page in between.
+  void _continueWatchingTap(
+    BuildContext context,
+    WidgetRef ref,
+    LatestEpisodeSelection? latestEpisode,
+    Map<String, dynamic>? progress,
+  ) {
+    final int? resumeFromSecs = (progress?['positionSecs'] as num?)?.toInt();
+
+    final ScrapingScreenArgs args = ScrapingScreenArgs(
+      mediaItem: mediaItem,
+      season: latestEpisode?.season,
+      episode: latestEpisode?.episode,
+      // seasonTmdbId / episodeTmdbId / seasonTitle: server has sane defaults
+      // when these are null (`Season N`, `${tmdb}-s${n}-e${m}`), so skipping
+      // the TMDB detail fetch here keeps the tap instant.
+      resumeFrom: resumeFromSecs,
+    );
+
+    if (GoRouter.maybeOf(context) case final GoRouter router) {
+      router.push('/scraping', extra: args);
+      return;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ScrapingScreen(
+          mediaItem: args.mediaItem,
+          season: args.season,
+          episode: args.episode,
+          resumeFrom: args.resumeFrom,
         ),
       ),
     );

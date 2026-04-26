@@ -12,6 +12,7 @@ class CategoryRow extends StatelessWidget {
     this.isLoading = false,
     this.onSeeAll,
     this.useSectionAccent = false,
+    this.cardBehavior = MediaCardBehavior.detail,
   });
 
   final String title;
@@ -19,6 +20,9 @@ class CategoryRow extends StatelessWidget {
   final bool isLoading;
   final VoidCallback? onSeeAll;
   final bool useSectionAccent;
+  /// Forwarded to each [MediaCard] in the row. Continue-watching rows pass
+  /// [MediaCardBehavior.continueWatching] so taps re-enter playback directly.
+  final MediaCardBehavior cardBehavior;
 
   @override
   Widget build(BuildContext context) {
@@ -72,18 +76,26 @@ class CategoryRow extends StatelessWidget {
         const SizedBox(height: AppSpacing.x3),
         SizedBox(
           height: rowHeight,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.x4),
-            itemCount: itemCount,
-            itemBuilder: (BuildContext context, int index) {
-              return Padding(
-                padding: const EdgeInsets.only(right: AppSpacing.x3),
-                child: isLoading
-                    ? const MediaCardSkeleton()
-                    : MediaCard(mediaItem: items[index]),
-              );
-            },
+          // Each horizontal row gets its own layer — scrolling or rebuilds in
+          // one row no longer trigger repaints of every other row above /
+          // below it on the home page.
+          child: RepaintBoundary(
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.x4),
+              itemCount: itemCount,
+              itemBuilder: (BuildContext context, int index) {
+                return Padding(
+                  padding: const EdgeInsets.only(right: AppSpacing.x3),
+                  child: isLoading
+                      ? const MediaCardSkeleton()
+                      : MediaCard(
+                          mediaItem: items[index],
+                          behavior: cardBehavior,
+                        ),
+                );
+              },
+            ),
           ),
         ),
       ],
