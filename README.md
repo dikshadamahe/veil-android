@@ -1,148 +1,113 @@
-# Veil
+<p align="center">
+  <img src="logo.png" alt="Veil" width="112" height="112" />
+</p>
 
-![Veil logo](logo.png)
+<h1 align="center">Veil</h1>
 
-**Veil** is a minimal Android streaming client: browse TMDB metadata, resolve streams through your own small backend, and play in-app with **media_kit**. It is **aggregator-only**—it does not host media, store video files, or operate as a CDN.
+<p align="center">
+  <strong>Browse. Resolve. Watch — on your Android device.</strong>
+</p>
 
-**Repository:** [github.com/dikshadamahe/veil-android](https://github.com/dikshadamahe/veil-android)
-
----
-
-## What you get
-
-| Area | Behavior |
-|------|----------|
-| **Discovery** | Trending and search (movies & TV), detail pages, posters from TMDB |
-| **Playback** | HLS/DASH-style streams via **media_kit**, headers from your resolver, resume & bookmarks (Hive) |
-| **Resolver** | SSE or blocking scrape against **providers-api**; optional **simple-proxy** for CDN-friendly fetches |
-| **History** | Watch history grid on device; continue-watching style flows where implemented |
-
-Design and behavior are aligned with the **xp-technologies-dev/p-stream** web reference where the team maps widgets to the original `.tsx` sources.
+<p align="center">
+  <a href="https://github.com/dikshadamahe/veil-android"><img src="https://img.shields.io/badge/Veil-android-0A0613?style=flat-square&logo=github&logoColor=white&labelColor=1a1a2e" alt="Veil on GitHub" /></a>
+  &nbsp;
+  <img src="https://img.shields.io/badge/Flutter-3.x-02569B?style=flat-square&logo=flutter&logoColor=white" alt="Flutter" />
+  &nbsp;
+  <img src="https://img.shields.io/badge/release-1.0.0-7C3AED?style=flat-square&labelColor=1a1a2e" alt="Version" />
+</p>
 
 ---
 
-## Architecture
+> **Aggregator only.** Veil does not host video, store media, or act as a CDN. It connects your TMDB catalog and your own resolver stack to playback in **media_kit**.
 
-```text
-┌─────────────────────┐
-│   Veil (Flutter)    │
-│   Android client    │
-└──────────┬──────────┘
-           │
-     ┌─────┴─────┐
-     ▼           ▼
-┌────────────┐  ┌──────────────┐
-│ providers- │  │ TMDB API     │
-│ api :3001  │  │ (read token) │
-└─────┬──────┘  └──────────────┘
-      │
-      ▼
-┌────────────┐
-│ simple-    │
-│ proxy :3000
-└─────┬──────┘
-      ▼
-┌────────────┐
-│ Streaming   │
-│ CDNs        │
-└────────────┘
+---
+
+## At a glance
+
+**Discover** — Trending & search, movies & TV, detail pages; posters and metadata from **TMDB**.
+
+**Play** — In-app player with resume, bookmarks, continue watching, subtitles, and adaptive controls.
+
+**Resolve** — Live scrape (**SSE**) or blocking calls to **providers-api**; optional **simple-proxy** when CDNs need a friendly hop.
+
+Screens follow the **[xp-technologies-dev/p-stream](https://github.com/xp-technologies-dev/p-stream)** web reference (Flutter widgets mapped from the original `.tsx` sources).
+
+---
+
+## Flow
+
+```mermaid
+flowchart LR
+  V(["Veil"]) --> T["TMDB"]
+  V --> P["providers-api\n:3001"]
+  P --> S["simple-proxy\n:3000"]
+  S --> C["Streams"]
 ```
 
-- **providers-api** — Node + Express wrapper around `@p-stream/providers`; lives in this repo under `backend/providers-api`.
-- **simple-proxy** — Run separately (e.g. on the same VM) for CORS/header-sensitive fetches. Reference: [xp-technologies-dev/simple-proxy](https://github.com/xp-technologies-dev/simple-proxy).
-- **Providers package** — Install from [xp-technologies-dev/providers](https://github.com/xp-technologies-dev/providers); the npm name remains `@p-stream/providers`.
-- **Scraper ids / Oracle** — See [`backend/providers-api/README.md`](backend/providers-api/README.md) and [`backend/providers-api/docs/CUSTOM_EMBED_INTEGRATION.md`](backend/providers-api/docs/CUSTOM_EMBED_INTEGRATION.md) (vidsrc-embed.ru, 2Embed.cc, AutoEmbed unchanged, CinePro Core OMSS).
+| | |
+|:---|:---|
+| **API** | [`backend/providers-api`](backend/providers-api/README.md) · Express + `@p-stream/providers` |
+| **Package** | [`xp-technologies-dev/providers`](https://github.com/xp-technologies-dev/providers) |
+| **Proxy** | [`xp-technologies-dev/simple-proxy`](https://github.com/xp-technologies-dev/simple-proxy) *(optional)* |
+| **Embeds** | [Custom integration](backend/providers-api/docs/CUSTOM_EMBED_INTEGRATION.md) |
 
 ---
 
-## Tech stack
+## Stack
 
-| Layer | Choice |
-|-------|--------|
-| App | Flutter 3.x, Dart |
-| State & routing | Riverpod, go_router |
-| Local data | Hive |
-| Player | media_kit, media_kit_video |
-| Backend | Node.js 20, pnpm, Express |
+Flutter · Riverpod · go_router · Hive · media_kit · Node **20** / **pnpm** (resolver)
+
+---
+
+## Backend
+
+```bash
+cd backend/providers-api && pnpm install && pnpm start
+```
+
+`curl http://127.0.0.1:3001/health` — listens on **3001** by default.
+
+---
+
+## Build
+
+Secrets stay out of source: pass **`--dart-define`** at build time. Prefer **HTTPS** in production.
+
+```bash
+flutter pub get
+dart run flutter_launcher_icons   # optional — syncs launcher from logo-circle.png
+flutter build apk --release \
+  --dart-define=ORACLE_URL=http://YOUR_HOST:3001 \
+  --dart-define=TMDB_TOKEN=YOUR_TMDB_READ_TOKEN
+```
+
+CI runs **`flutter analyze`**, **`dart run flutter_launcher_icons`**, then the release APK with the same defines — configure **`ORACLE_URL`** and **`TMDB_TOKEN`** (or **`TMDB_READ_TOKEN`**) in GitHub variables or secrets.
+
+<details>
+<summary><strong>Optional defines</strong> — subtitles, scrape order</summary>
+
+| Define | Purpose |
+|--------|---------|
+| `SCRAPE_SOURCE_ORDER` | Comma-separated source `id`s from `GET /sources` (see backend README). |
+| `WYZIE_API_KEY` | Wyzie subs — **Search online…** in the player. |
+| `OPENSUBTITLES_API_KEY` | OpenSubtitles REST key. |
+| `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` | Account pairing when the API key alone is not enough. |
+| `SUBTITLE_HTTP_USER_AGENT` | Override UA for subtitle fetches (default `Veil 1.0.0`). |
+
+</details>
 
 ---
 
 ## Repo layout
 
-```text
-backend/providers-api/   Health, /scrape, /scrape/stream (SSE) + README for operators
-android/                 Android embedding, Gradle, manifests
-lib/                     Flutter app (screens, services, widgets)
-test/                    Widget / unit tests
-logo.png                 Brand mark (README + icon pipeline)
-```
-
----
-
-## Backend: local run
-
-From `backend/providers-api`:
-
-```bash
-pnpm install
-pnpm start
-```
-
-Default listen port: **3001**.
-
-```bash
-curl http://127.0.0.1:3001/health
-```
-
-Example movie scrape:
-
-```bash
-curl "http://127.0.0.1:3001/scrape?type=movie&tmdbId=550&title=Fight%20Club&year=1999"
-```
-
-Point the app at your deployed host with `--dart-define=ORACLE_URL=...` (see below).
-
----
-
-## Android: build & run
-
-The app reads **runtime** configuration (no secrets in source):
-
-| Define | Purpose |
-|--------|---------|
-| `ORACLE_URL` | Base URL of **providers-api** (e.g. `http://YOUR_VM_IP:3001`) |
-| `SCRAPE_SOURCE_ORDER` | Optional — comma-separated **source** `id`s from your Oracle `GET /sources` (see `backend/providers-api/README.md` and `docs/CUSTOM_EMBED_INTEGRATION.md`). Default: `vidlink,fedapi,fedapidb,ridomovies,rgshows,vidrock`. Empty define → library default order. |
-| `TMDB_TOKEN` | TMDB **read** access token |
-| `WYZIE_API_KEY` | Optional — [Wyzie Subs](https://sub.wyzie.io/redeem) key for **Search online…** subtitles in the player |
-| `OPENSUBTITLES_API_KEY` | Optional — [OpenSubtitles.com](https://www.opensubtitles.com/en/consumers) REST **Api-Key** (search + download) |
-| `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` | Optional — OpenSubtitles **account**; improves `/download` success when API key alone is not enough |
-| `SUBTITLE_HTTP_USER_AGENT` | Optional override for subtitle HTTP requests (default `Veil 1.0.0`) |
-
-**Release APK example:**
-
-```bash
-flutter pub get
-flutter build apk --release \
-  --dart-define=ORACLE_URL=http://YOUR_VM_IP:3001 \
-  --dart-define=TMDB_TOKEN=YOUR_TMDB_READ_ACCESS_TOKEN \
-  --dart-define=WYZIE_API_KEY=YOUR_WYZIE_KEY \
-  --dart-define=OPENSUBTITLES_API_KEY=YOUR_OS_API_KEY
-```
-
-Store subtitle keys in **GitHub Actions secrets** (or local env only); do not commit them. Release workflow passes them through when `WYZIE_API_KEY` / `OPENSUBTITLES_*` secrets are set.
-
-Use **HTTPS** in production when your infrastructure supports it; cleartext is only appropriate for controlled lab/VPN setups.
-
----
-
-## Development notes
-
-- **Upstream code** for providers and proxy: prefer `xp-technologies-dev/*` on GitHub over legacy `p-stream/*` naming in old docs.
-- **Git identity / remotes** for collaborators: see `switch-dev.sh` (when not gitignored locally) or your team’s SSH host aliases for `github-diksha` / `github-pracheer`.
-- **Flutter analyze** should stay clean before merge; CI may run `flutter analyze` on `main` and PRs.
+| Path | Role |
+|------|------|
+| `backend/providers-api/` | Resolver API + operator docs |
+| `lib/` | Flutter app |
+| `android/` | Gradle, manifest, launcher assets |
 
 ---
 
 ## Disclaimer
 
-Veil is a **metadata and playback orchestration** tool. You are responsible for how you configure backends, respect TMDB and provider terms, and comply with applicable law.
+Veil is a **metadata and playback orchestration** tool. You are responsible for backend configuration, provider and TMDB terms, and compliance with applicable law.
