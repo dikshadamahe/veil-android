@@ -456,35 +456,45 @@ class _QualityCapTile extends StatelessWidget {
                   style: Theme.of(sheetContext).textTheme.bodySmall,
                 ),
                 const SizedBox(height: AppSpacing.x3),
-                for (final ({String id, String label, String hint}) opt
-                    in const <({String id, String label, String hint})>[
-                  (
-                    id: LocalStorage.qualityCapAuto,
-                    label: 'Auto',
-                    hint: 'Use the source default',
+                // Flutter 3.32+ deprecates per-tile `groupValue` / `onChanged`
+                // on [RadioListTile]; the group is now driven by an ancestor
+                // [RadioGroup] that owns the selected value and handler.
+                RadioGroup<String>(
+                  groupValue: value,
+                  onChanged: (String? next) {
+                    if (next != null) {
+                      Navigator.of(sheetContext).pop(next);
+                    }
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      for (final ({String id, String label, String hint}) opt
+                          in const <({String id, String label, String hint})>[
+                        (
+                          id: LocalStorage.qualityCapAuto,
+                          label: 'Auto',
+                          hint: 'Use the source default',
+                        ),
+                        (
+                          id: LocalStorage.qualityCap720,
+                          label: '720p cap',
+                          hint: 'Save data on cellular',
+                        ),
+                        (
+                          id: LocalStorage.qualityCap1080,
+                          label: '1080p cap',
+                          hint: 'Best quality on Wi-Fi',
+                        ),
+                      ])
+                        RadioListTile<String>(
+                          value: opt.id,
+                          title: Text(opt.label),
+                          subtitle: Text(opt.hint),
+                        ),
+                    ],
                   ),
-                  (
-                    id: LocalStorage.qualityCap720,
-                    label: '720p cap',
-                    hint: 'Save data on cellular',
-                  ),
-                  (
-                    id: LocalStorage.qualityCap1080,
-                    label: '1080p cap',
-                    hint: 'Best quality on Wi-Fi',
-                  ),
-                ])
-                  RadioListTile<String>(
-                    value: opt.id,
-                    groupValue: value,
-                    onChanged: (String? next) {
-                      if (next != null) {
-                        Navigator.of(sheetContext).pop(next);
-                      }
-                    },
-                    title: Text(opt.label),
-                    subtitle: Text(opt.hint),
-                  ),
+                ),
               ],
             ),
           ),
