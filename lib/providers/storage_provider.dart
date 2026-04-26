@@ -94,6 +94,21 @@ final watchStatsProvider = Provider<WatchStats>((Ref ref) {
   return LocalStorage.getWatchStats();
 });
 
+final subtitleSizePrefProvider = Provider<int>((Ref ref) {
+  ref.watch(storageRevisionProvider);
+  return LocalStorage.getSubtitleSize();
+});
+
+final subtitleColorPrefProvider = Provider<String>((Ref ref) {
+  ref.watch(storageRevisionProvider);
+  return LocalStorage.getSubtitleColor();
+});
+
+final subtitleBgOpacityPrefProvider = Provider<double>((Ref ref) {
+  ref.watch(storageRevisionProvider);
+  return LocalStorage.getSubtitleBgOpacity();
+});
+
 final storageControllerProvider = Provider<StorageController>((Ref ref) {
   return StorageController(ref);
 });
@@ -133,6 +148,21 @@ class StorageController {
 
   Future<void> setSubtitlesDefaultOn(bool value) async {
     await LocalStorage.setSubtitlesDefaultOn(value);
+    _refresh();
+  }
+
+  Future<void> setSubtitleSize(int value) async {
+    await LocalStorage.setSubtitleSize(value);
+    _refresh();
+  }
+
+  Future<void> setSubtitleColor(String value) async {
+    await LocalStorage.setSubtitleColor(value);
+    _refresh();
+  }
+
+  Future<void> setSubtitleBgOpacity(double value) async {
+    await LocalStorage.setSubtitleBgOpacity(value);
     _refresh();
   }
 

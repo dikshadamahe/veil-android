@@ -14,11 +14,20 @@ class LocalStorage {
   // Pref keys
   static const String prefKeyQualityCap = 'pref_quality_cap';
   static const String prefKeySubtitlesDefaultOn = 'pref_subtitles_default_on';
+  static const String prefKeySubtitleSize = 'pref_subtitle_size';
+  static const String prefKeySubtitleColor = 'pref_subtitle_color';
+  static const String prefKeySubtitleBgOpacity = 'pref_subtitle_bg_opacity';
 
   // Quality cap values
   static const String qualityCapAuto = 'auto';
   static const String qualityCap720 = '720p';
   static const String qualityCap1080 = '1080p';
+
+  // Subtitle style: stored as 0-100 ints / hex strings so Hive doesn't have
+  // to track type adapters. Defaults match a comfortable mobile baseline.
+  static const int subtitleSizeDefault = 32; // media_kit `sub-font-size`
+  static const String subtitleColorDefault = '#FFFFFFFF';
+  static const double subtitleBgOpacityDefault = 0.5;
 
   static Future<void> init() async {
     await Hive.initFlutter();
@@ -240,6 +249,48 @@ class LocalStorage {
 
   static Future<void> setSubtitlesDefaultOn(bool value) async {
     await _prefsBox.put(prefKeySubtitlesDefaultOn, value);
+  }
+
+  /// Subtitle font size in points (media_kit `sub-font-size`). Range 16–56.
+  static int getSubtitleSize() {
+    final dynamic raw = _prefsBox.get(prefKeySubtitleSize);
+    if (raw is int) {
+      return raw.clamp(16, 56);
+    }
+    return subtitleSizeDefault;
+  }
+
+  static Future<void> setSubtitleSize(int value) async {
+    await _prefsBox.put(prefKeySubtitleSize, value.clamp(16, 56));
+  }
+
+  /// Subtitle text color, stored as `#AARRGGBB` hex string.
+  static String getSubtitleColor() {
+    final dynamic raw = _prefsBox.get(prefKeySubtitleColor);
+    if (raw is String && raw.startsWith('#') && raw.length == 9) {
+      return raw;
+    }
+    return subtitleColorDefault;
+  }
+
+  static Future<void> setSubtitleColor(String value) async {
+    await _prefsBox.put(prefKeySubtitleColor, value);
+  }
+
+  /// Subtitle background opacity, 0.0..1.0.
+  static double getSubtitleBgOpacity() {
+    final dynamic raw = _prefsBox.get(prefKeySubtitleBgOpacity);
+    if (raw is num) {
+      return raw.toDouble().clamp(0.0, 1.0);
+    }
+    return subtitleBgOpacityDefault;
+  }
+
+  static Future<void> setSubtitleBgOpacity(double value) async {
+    await _prefsBox.put(
+      prefKeySubtitleBgOpacity,
+      value.clamp(0.0, 1.0),
+    );
   }
 
   /// Aggregate watch statistics derived from existing boxes; no extra Hive

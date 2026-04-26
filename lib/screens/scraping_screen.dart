@@ -12,7 +12,7 @@ import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/screens/player_screen.dart';
 import 'package:pstream_android/services/stream_service.dart';
 import 'package:pstream_android/widgets/scrape_source_card.dart'
-    show ScrapeSourceCard, ScrapeStatus;
+    show ScrapeSourceCard, ScrapeStatus, StatusCircle;
 
 class ScrapingScreenArgs {
   const ScrapingScreenArgs({
@@ -498,12 +498,28 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final int attemptedCount = _attemptedSourceIds.length;
     final List<String> orderedSources = _orderedSourceIdsForUi();
+    final _ScrapeNode? activeNode =
+        _currentPendingSourceId != null ? _nodes[_currentPendingSourceId] : null;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Finding stream')),
+      backgroundColor: AppColors.backgroundMain,
+      appBar: AppBar(
+        backgroundColor: AppColors.backgroundMain,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        leading: IconButton(
+          onPressed: () => Navigator.of(context).maybePop(),
+          icon: const Icon(Icons.arrow_back_rounded),
+        ),
+        title: Text(
+          widget.mediaItem.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
       body: SafeArea(
+        top: false,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
@@ -512,112 +528,126 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
                 child: LinearProgressIndicator(minHeight: AppSpacing.x1),
               ),
             Expanded(
-              child: LayoutBuilder(
-                builder: (BuildContext context, BoxConstraints constraints) {
-                  return SingleChildScrollView(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.all(AppSpacing.x4),
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        minHeight: constraints.maxHeight,
-                      ),
-                      child: Center(
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 560),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: <Widget>[
-                              Text(
-                                widget.mediaItem.title,
-                                textAlign: TextAlign.center,
-                                style: Theme.of(
-                                  context,
-                                ).textTheme.headlineSmall,
-                              ),
-                              const SizedBox(height: AppSpacing.x2),
-                              Text(
-                                _statusMessage(attemptedCount),
-                                textAlign: TextAlign.center,
-                                style: Theme.of(context).textTheme.bodyMedium
-                                    ?.copyWith(color: AppColors.typeText),
-                              ),
-                              const SizedBox(height: AppSpacing.x4),
-                              if (orderedSources.isNotEmpty) ...<Widget>[
-                                ListView.separated(
-                                  shrinkWrap: true,
-                                  physics: const NeverScrollableScrollPhysics(),
-                                  itemCount: orderedSources.length,
-                                  separatorBuilder:
-                                      (BuildContext context, int index) {
-                                    return const SizedBox(
-                                      height: AppSpacing.x2,
-                                    );
-                                  },
-                                  itemBuilder: (BuildContext context, int index) {
-                                    final String id = orderedSources[index];
-                                    final _ScrapeNode? node = _nodes[id];
-                                    if (node == null) {
-                                      return const SizedBox.shrink();
-                                    }
-                                    final ScrapeStatus st =
-                                        _displayStatusForList(id);
-                                    return ScrapeSourceCard(
-                                      sourceName: node.name,
-                                      status: st,
-                                      subline: st == ScrapeStatus.pending
-                                          ? 'Checking for videos…'
-                                          : null,
-                                    );
-                                  },
-                                ),
-                                const SizedBox(height: AppSpacing.x2),
-                                Text(
-                                  'Sources are tried in order. This can take up to a minute.',
-                                  textAlign: TextAlign.center,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .labelSmall
-                                      ?.copyWith(
-                                        color: AppColors.typeSecondary,
-                                      ),
-                                ),
-                              ] else
-                                _IdleScrapeCard(
-                                  label: _isLoading
-                                      ? 'Preparing provider list…'
-                                      : 'Waiting for the next step.',
-                                ),
-                            ],
-                          ),
+              child: SingleChildScrollView(
+                controller: _scrollController,
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.x4,
+                  AppSpacing.x6,
+                  AppSpacing.x4,
+                  AppSpacing.x4,
+                ),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 480),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        _ScrapingHeader(
+                          activeName: activeNode?.name,
+                          allFailure: _allFailure,
+                          loading: _isLoading,
                         ),
-                      ),
+                        const SizedBox(height: AppSpacing.x6),
+                        if (orderedSources.isNotEmpty)
+                          ListView.builder(
+                            shrinkWrap: true,
+                            physics: const NeverScrollableScrollPhysics(),
+                            itemCount: orderedSources.length,
+                            itemBuilder: (BuildContext context, int index) {
+                              final String id = orderedSources[index];
+                              final _ScrapeNode? node = _nodes[id];
+                              if (node == null) {
+                                return const SizedBox.shrink();
+                              }
+                              final ScrapeStatus st = _displayStatusForList(id);
+                              return ScrapeSourceCard(
+                                sourceName: node.name,
+                                status: st,
+                                subline: st == ScrapeStatus.pending
+                                    ? 'Checking for videos…'
+                                    : null,
+                              );
+                            },
+                          )
+                        else
+                          _IdleScrapeCard(
+                            label: _isLoading
+                                ? 'Preparing provider list…'
+                                : 'Waiting for the next step.',
+                          ),
+                      ],
                     ),
-                  );
-                },
+                  ),
+                ),
               ),
             ),
             if (_allFailure)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.x4,
-                  AppSpacing.x0,
-                  AppSpacing.x4,
-                  AppSpacing.x6,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    Text(
-                      _failureMessage ?? 'No sources found',
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: AppSpacing.x3),
-                    FilledButton(
-                      onPressed: _showManualPicker,
-                      child: const Text('Choose source'),
-                    ),
-                  ],
+              SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.x4,
+                    AppSpacing.x2,
+                    AppSpacing.x4,
+                    AppSpacing.x4,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      Text(
+                        'Tip: Subtitles, quality and source default can be changed in Settings.',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: AppColors.typeSecondary,
+                            ),
+                      ),
+                      const SizedBox(height: AppSpacing.x3),
+                      Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                minimumSize:
+                                    const Size.fromHeight(AppSpacing.x12),
+                              ),
+                              onPressed: () =>
+                                  Navigator.of(context).maybePop(),
+                              child: const Text('Back to home'),
+                            ),
+                          ),
+                          const SizedBox(width: AppSpacing.x3),
+                          Expanded(
+                            child: FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: AppColors.buttonsPurple,
+                                foregroundColor: AppColors.typeEmphasis,
+                                minimumSize:
+                                    const Size.fromHeight(AppSpacing.x12),
+                              ),
+                              onPressed: () {
+                                setState(() {
+                                  _allFailure = false;
+                                  _failureMessage = null;
+                                  _isLoading = true;
+                                  _statuses.clear();
+                                  for (final String id in _sourceOrder) {
+                                    _statuses[id] = ScrapeStatus.waiting;
+                                  }
+                                });
+                                _startStreamScrape();
+                              },
+                              child: const Text('Try again'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: AppSpacing.x2),
+                      TextButton(
+                        onPressed: _showManualPicker,
+                        child: const Text('Choose source manually'),
+                      ),
+                    ],
+                  ),
                 ),
               ),
           ],
@@ -626,33 +656,75 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     );
   }
 
-  Iterable<String> get _attemptedSourceIds sync* {
-    for (final String sourceId in _sourceOrder.reversed) {
-      final ScrapeStatus status = _statuses[sourceId] ?? ScrapeStatus.waiting;
-      if (status == ScrapeStatus.failure ||
-          status == ScrapeStatus.notfound ||
-          status == ScrapeStatus.success) {
-        yield sourceId;
-      }
-    }
-  }
+}
 
-  String _statusMessage(int attemptedCount) {
-    if (_allFailure) {
-      return 'Every automatic source failed. Pick one manually.';
-    }
-    if (_currentPendingSourceId != null) {
-      return attemptedCount == 0
-          ? 'Trying the first available source.'
-          : 'Trying another source after $attemptedCount attempt${attemptedCount == 1 ? '' : 's'}.';
-    }
-    if (_sourceOrder.isEmpty && _isLoading) {
-      return 'Loading source catalog.';
-    }
-    if (_orderedSourceIdsForUi().isNotEmpty) {
-      return 'Hang tight while we find a working stream.';
-    }
-    return 'Preparing playback.';
+/// Centered hero block above the source list. Mirrors the web scraping
+/// page's "Looking for streams" + active provider readout.
+class _ScrapingHeader extends StatelessWidget {
+  const _ScrapingHeader({
+    required this.activeName,
+    required this.allFailure,
+    required this.loading,
+  });
+
+  final String? activeName;
+  final bool allFailure;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final String headline = allFailure
+        ? 'No stream found'
+        : (activeName != null
+            ? 'Looking for streams'
+            : (loading ? 'Looking for streams' : 'Preparing'));
+    final String? sub = allFailure
+        ? 'Every source we tried did not work. Try again or pick one manually.'
+        : (activeName != null
+            ? 'Currently checking $activeName'
+            : 'Picking up the source catalog from the resolver.');
+
+    return Column(
+      children: <Widget>[
+        Center(
+          child: SizedBox(
+            width: AppSpacing.x16,
+            height: AppSpacing.x16,
+            child: allFailure
+                ? const StatusCircle(
+                    status: ScrapeStatus.failure,
+                    size: AppSpacing.x16,
+                    strokeWidth: 3,
+                  )
+                : const StatusCircle(
+                    status: ScrapeStatus.pending,
+                    size: AppSpacing.x16,
+                    strokeWidth: 3,
+                  ),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.x4),
+        Text(
+          headline,
+          textAlign: TextAlign.center,
+          style: theme.textTheme.headlineSmall?.copyWith(
+            color: AppColors.typeEmphasis,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        if (sub != null) ...<Widget>[
+          const SizedBox(height: AppSpacing.x2),
+          Text(
+            sub,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: AppColors.typeSecondary,
+            ),
+          ),
+        ],
+      ],
+    );
   }
 }
 

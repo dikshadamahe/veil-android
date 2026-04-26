@@ -23,6 +23,7 @@ dependencies:
   http: ^1.5.0
   dio: ^5.9.0
   screen_brightness: ^2.1.1
+  file_picker: ^11.0.2
 
 dev_dependencies:
   flutter_test:

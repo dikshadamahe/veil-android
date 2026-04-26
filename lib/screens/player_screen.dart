@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:pstream_android/config/app_config.dart';
@@ -207,6 +210,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return int.tryParse(match.group(1)!);
   }
 
+  /// Push the user's saved subtitle style (size / text color / background
+  /// opacity) into the native libmpv player. Called both right after a
+  /// stream opens and again whenever the Customize sheet writes a new pref.
+  Future<void> _applyNativeSubtitleStyleFromPrefs() async {
+    await applyNativeSubtitleStyle(
+      _player,
+      size: LocalStorage.getSubtitleSize(),
+      colorHex: LocalStorage.getSubtitleColor(),
+      bgOpacity: LocalStorage.getSubtitleBgOpacity(),
+    );
+  }
+
   Future<void> _applyPlayerChrome() async {
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
@@ -307,6 +322,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _resumeApplied = false;
       await _player.open(Media(url, httpHeaders: headers));
       await applyNativePlaybackTune(_player);
+      await _applyNativeSubtitleStyleFromPrefs();
       await _player.setVolume(_softwareVolume);
       await _applySelectedSubtitleTrack();
       if (!mounted) {
@@ -649,7 +665,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return _PlayerSheetScaffold(
           child: _PlayerOptionSheet(
             title: 'Subtitles',
+            trailingText: 'Customize',
             onBack: () => Navigator.of(context).pop(),
+            onTrailingTap: () {
+              Navigator.of(context).pop();
+              unawaited(_openCustomizeSubtitlesSheet());
+            },
             child: ListView(
               shrinkWrap: true,
               children: <Widget>[
@@ -670,12 +691,48 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     _enableAutoSubtitles();
                   },
                 ),
+                _PlayerOptionRow(
+                  title: 'Drop or upload file',
+                  subtitle: '.srt or .vtt from this device',
+                  showChevron: true,
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    unawaited(_pickSubtitleFile());
+                  },
+                ),
+                _PlayerOptionRow(
+                  title: 'Paste subtitle data',
+                  subtitle: 'Paste raw VTT or SRT text',
+                  showChevron: true,
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    unawaited(_openPasteSubtitleSheet());
+                  },
+                ),
+                _PlayerOptionRow(
+                  title: 'Transcript',
+                  subtitle: _selectedCaption != null
+                      ? 'Read the active track as text'
+                      : 'Pick a subtitle first to read its transcript',
+                  showChevron: true,
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    if (_selectedCaption?.url?.isNotEmpty == true) {
+                      unawaited(_openTranscriptSheet(_selectedCaption!));
+                    } else {
+                      _setSubtitleState(
+                        enabled: _subtitlesEnabled,
+                        message:
+                            'Pick a subtitle track first to read transcript.',
+                      );
+                    }
+                  },
+                ),
                 if (AppConfig.hasWyzieApiKey ||
                     AppConfig.hasOpensubtitlesApiKey)
                   _PlayerOptionRow(
                     title: 'Search online…',
                     subtitle: 'Wyzie & OpenSubtitles',
-                    selected: false,
                     showChevron: true,
                     onTap: () {
                       Navigator.of(context).pop();
@@ -714,11 +771,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return _PlayerSheetScaffold(
           child: _PlayerOptionSheet(
             title: language,
-            trailingIcon: Icons.sync_alt_rounded,
+            trailingText: 'Customize',
             onBack: () => Navigator.of(context).pop(),
             onTrailingTap: () {
               Navigator.of(context).pop();
-              _openSubtitlesSheet();
+              unawaited(_openCustomizeSubtitlesSheet());
             },
             child: ListView.builder(
               shrinkWrap: true,
@@ -737,6 +794,196 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 );
               },
             ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Picks a local subtitle file via the system file picker, then loads it
+  /// as the active track. Honors `.srt` / `.vtt` extensions.
+  Future<void> _pickSubtitleFile() async {
+    try {
+      // file_picker 11.x replaced `FilePicker.platform.pickFiles` with a
+      // static method on the [FilePicker] class itself.
+      final FilePickerResult? picked = await FilePicker.pickFiles(
+        allowMultiple: false,
+        type: FileType.custom,
+        allowedExtensions: const <String>['srt', 'vtt'],
+      );
+      if (picked == null || picked.files.isEmpty) {
+        return;
+      }
+      final String? path = picked.files.single.path;
+      if (path == null || path.isEmpty) {
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      _selectedCaption = null;
+      _subtitlesEnabled = true;
+      await _player.setSubtitleTrack(
+        SubtitleTrack.uri(
+          'file://$path',
+          title: picked.files.single.name,
+          language: 'local',
+        ),
+      );
+      _setSubtitleState(enabled: true, message: 'Loaded ${picked.files.single.name}');
+    } catch (_) {
+      if (mounted) {
+        _setSubtitleState(
+          enabled: _subtitlesEnabled,
+          message: 'Could not load that file',
+        );
+      }
+    }
+  }
+
+  /// Inline subtitle editor: paste raw VTT/SRT text and load it as a data
+  /// URI so the player can render it without disk I/O.
+  Future<void> _openPasteSubtitleSheet() async {
+    final TextEditingController controller = TextEditingController();
+    final String? raw = await _showPlayerSheet<String>(
+      builder: (BuildContext context) {
+        return _PlayerSheetScaffold(
+          child: Padding(
+            padding: const EdgeInsets.all(AppSpacing.x4),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.arrow_back_rounded),
+                    ),
+                    Expanded(
+                      child: Text(
+                        'Paste subtitle data',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                              color: AppColors.typeEmphasis,
+                            ),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () =>
+                          Navigator.of(context).pop(controller.text),
+                      child: const Text('Apply'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.x2),
+                Text(
+                  'Paste raw VTT or SRT text. The player will treat it as the active subtitle track until playback ends.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: AppSpacing.x3),
+                TextField(
+                  controller: controller,
+                  minLines: 10,
+                  maxLines: 16,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppColors.typeEmphasis,
+                      ),
+                  decoration: InputDecoration(
+                    hintText: 'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello',
+                    hintStyle: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppColors.typeSecondary,
+                        ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(AppSpacing.x3),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    controller.dispose();
+
+    if (raw == null) {
+      return;
+    }
+    final String trimmed = raw.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+    final bool isVtt = trimmed.toUpperCase().startsWith('WEBVTT');
+    final String mime = isVtt ? 'text/vtt' : 'application/x-subrip';
+    final String dataUri =
+        'data:$mime;base64,${base64Encode(utf8.encode(trimmed))}';
+    if (!mounted) {
+      return;
+    }
+    _selectedCaption = null;
+    _subtitlesEnabled = true;
+    try {
+      await _player.setSubtitleTrack(
+        SubtitleTrack.uri(
+          dataUri,
+          title: 'Pasted',
+          language: 'local',
+        ),
+      );
+      _setSubtitleState(enabled: true, message: 'Pasted subtitle applied');
+    } catch (_) {
+      if (mounted) {
+        _setSubtitleState(
+          enabled: _subtitlesEnabled,
+          message: 'Could not apply pasted subtitle',
+        );
+      }
+    }
+  }
+
+  /// Read-only transcript viewer. Fetches the selected track, parses cue
+  /// lines, and renders them as a scrollable list with timestamps.
+  Future<void> _openTranscriptSheet(StreamCaption caption) async {
+    await _showPlayerSheet<void>(
+      builder: (BuildContext context) {
+        return _PlayerSheetScaffold(
+          child: _TranscriptSheet(
+            caption: caption,
+            onBack: () => Navigator.of(context).pop(),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Customize the on-screen subtitle render: font size, text color, and
+  /// background opacity. Persists each change via [storageControllerProvider]
+  /// and pushes the new style into libmpv immediately.
+  Future<void> _openCustomizeSubtitlesSheet() async {
+    await _showPlayerSheet<void>(
+      builder: (BuildContext context) {
+        return _PlayerSheetScaffold(
+          child: _SubtitleCustomizeSheet(
+            initialSize: LocalStorage.getSubtitleSize(),
+            initialColor: LocalStorage.getSubtitleColor(),
+            initialBgOpacity: LocalStorage.getSubtitleBgOpacity(),
+            onChanged: ({int? size, String? color, double? bgOpacity}) async {
+              if (size != null) {
+                await ref.read(storageControllerProvider).setSubtitleSize(size);
+              }
+              if (color != null) {
+                await ref
+                    .read(storageControllerProvider)
+                    .setSubtitleColor(color);
+              }
+              if (bgOpacity != null) {
+                await ref
+                    .read(storageControllerProvider)
+                    .setSubtitleBgOpacity(bgOpacity);
+              }
+              await _applyNativeSubtitleStyleFromPrefs();
+            },
+            onBack: () => Navigator.of(context).pop(),
           ),
         );
       },
@@ -1877,7 +2124,21 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
               _PlayerSettingsCard(title: 'Audio', subtitle: audioLabel),
             ],
           ),
-          const SizedBox(height: AppSpacing.x5),
+          const SizedBox(height: AppSpacing.x4),
+          // Web-parity rows (Download / Watch Party). Surfaced as
+          // coming-soon entries so visual parity is preserved without
+          // shipping a half-baked feature inside this aggregator-only
+          // build.
+          const _PlayerComingSoonTile(
+            icon: Icons.download_rounded,
+            title: 'Download',
+          ),
+          const SizedBox(height: AppSpacing.x2),
+          const _PlayerComingSoonTile(
+            icon: Icons.podcasts_rounded,
+            title: 'Watch Party',
+          ),
+          const SizedBox(height: AppSpacing.x4),
           const Divider(color: AppColors.utilsDivider, height: AppSpacing.x0),
           const SizedBox(height: AppSpacing.x4),
           _PlayerToggleRow(
@@ -1895,6 +2156,60 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
             subtitle:
                 'Quality, source, subtitles, and stream-specific options.',
           ),
+          const SizedBox(height: AppSpacing.x3),
+          const _PlayerComingSoonTile(
+            icon: Icons.skip_next_rounded,
+            title: 'Skip Segments',
+            inlineChevron: true,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Visual placeholder row used in the player settings hub for features that
+/// match web parity (Download, Watch Party, Skip Segments) but are gated to
+/// a later milestone in this aggregator build.
+class _PlayerComingSoonTile extends StatelessWidget {
+  const _PlayerComingSoonTile({
+    required this.icon,
+    required this.title,
+    this.inlineChevron = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final bool inlineChevron;
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: 0.55,
+      child: Row(
+        children: <Widget>[
+          Icon(icon, color: AppColors.typeLink),
+          const SizedBox(width: AppSpacing.x3),
+          Expanded(
+            child: Text(
+              title,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+          ),
+          Text(
+            'Soon',
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: AppColors.typeSecondary,
+                ),
+          ),
+          if (inlineChevron)
+            const Padding(
+              padding: EdgeInsets.only(left: AppSpacing.x2),
+              child: Icon(
+                Icons.chevron_right_rounded,
+                color: AppColors.typeSecondary,
+              ),
+            ),
         ],
       ),
     );
@@ -2405,4 +2720,401 @@ class _PlayerInlineInfoRow extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Subtitle styling editor used by the in-player Customize sheet. Stays
+/// stateful so dragging the sliders renders smooth previews; persistence
+/// is fan-out via [onChanged] so the player can re-apply native style.
+class _SubtitleCustomizeSheet extends StatefulWidget {
+  const _SubtitleCustomizeSheet({
+    required this.initialSize,
+    required this.initialColor,
+    required this.initialBgOpacity,
+    required this.onChanged,
+    required this.onBack,
+  });
+
+  final int initialSize;
+  final String initialColor;
+  final double initialBgOpacity;
+  final void Function({int? size, String? color, double? bgOpacity}) onChanged;
+  final VoidCallback onBack;
+
+  @override
+  State<_SubtitleCustomizeSheet> createState() =>
+      _SubtitleCustomizeSheetState();
+}
+
+class _SubtitleCustomizeSheetState extends State<_SubtitleCustomizeSheet> {
+  late int _size = widget.initialSize;
+  late String _color = widget.initialColor;
+  late double _bgOpacity = widget.initialBgOpacity;
+
+  static const List<({String hex, String label, Color swatch})> _palette =
+      <({String hex, String label, Color swatch})>[
+    (hex: '#FFFFFFFF', label: 'White', swatch: Color(0xFFFFFFFF)),
+    (hex: '#FFFCEC61', label: 'Yellow', swatch: Color(0xFFFCEC61)),
+    (hex: '#FF60D26A', label: 'Green', swatch: Color(0xFF60D26A)),
+    (hex: '#FF8288FE', label: 'Purple', swatch: Color(0xFF8288FE)),
+    (hex: '#FFF46E6E', label: 'Red', swatch: Color(0xFFF46E6E)),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.x4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              IconButton(
+                onPressed: widget.onBack,
+                icon: const Icon(Icons.arrow_back_rounded),
+              ),
+              Expanded(
+                child: Text(
+                  'Customize subtitles',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        color: AppColors.typeEmphasis,
+                      ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.x3),
+          // Live preview block. Mirrors the on-screen subtitle render so
+          // the slider/color choices feel immediate.
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: AppColors.blackC50,
+              borderRadius: BorderRadius.circular(AppSpacing.x3),
+              border: Border.all(color: AppColors.dropdownBorder),
+            ),
+            child: SizedBox(
+              height: 96,
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.x3,
+                    vertical: AppSpacing.x2,
+                  ),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: _bgOpacity),
+                      borderRadius: BorderRadius.circular(AppSpacing.x2),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.x2,
+                        vertical: AppSpacing.x1,
+                      ),
+                      child: Text(
+                        'Sample subtitle text',
+                        style: TextStyle(
+                          color: _hexToColor(_color),
+                          fontSize: _size.toDouble(),
+                          fontWeight: FontWeight.w600,
+                          shadows: const <Shadow>[
+                            Shadow(
+                              color: Colors.black,
+                              offset: Offset(0, 1),
+                              blurRadius: 2,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: AppSpacing.x4),
+          Text('Font size', style: Theme.of(context).textTheme.titleMedium),
+          Slider(
+            min: 16,
+            max: 56,
+            divisions: 20,
+            value: _size.toDouble(),
+            label: '$_size',
+            onChanged: (double value) {
+              setState(() {
+                _size = value.round();
+              });
+              widget.onChanged(size: _size);
+            },
+          ),
+          const SizedBox(height: AppSpacing.x2),
+          Text('Text color', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: AppSpacing.x2),
+          Wrap(
+            spacing: AppSpacing.x3,
+            runSpacing: AppSpacing.x2,
+            children: <Widget>[
+              for (final ({String hex, String label, Color swatch}) opt
+                  in _palette)
+                _ColorSwatch(
+                  swatch: opt.swatch,
+                  selected: _color.toUpperCase() == opt.hex.toUpperCase(),
+                  onTap: () {
+                    setState(() {
+                      _color = opt.hex;
+                    });
+                    widget.onChanged(color: _color);
+                  },
+                ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.x4),
+          Text(
+            'Background opacity',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          Slider(
+            min: 0,
+            max: 1,
+            divisions: 10,
+            value: _bgOpacity,
+            label: '${(_bgOpacity * 100).round()}%',
+            onChanged: (double value) {
+              setState(() {
+                _bgOpacity = value;
+              });
+              widget.onChanged(bgOpacity: _bgOpacity);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  static Color _hexToColor(String hex) {
+    final String clean = hex.startsWith('#') ? hex.substring(1) : hex;
+    final int parsed = int.tryParse(clean, radix: 16) ?? 0xFFFFFFFF;
+    return Color(parsed);
+  }
+}
+
+class _ColorSwatch extends StatelessWidget {
+  const _ColorSwatch({
+    required this.swatch,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final Color swatch;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppSpacing.x4),
+      child: Container(
+        width: AppSpacing.x10,
+        height: AppSpacing.x10,
+        decoration: BoxDecoration(
+          color: swatch,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? AppColors.typeEmphasis : AppColors.dropdownBorder,
+            width: selected ? 3 : 1,
+          ),
+        ),
+        child: selected
+            ? const Icon(
+                Icons.check_rounded,
+                color: AppColors.blackC50,
+                size: AppSpacing.x5,
+              )
+            : null,
+      ),
+    );
+  }
+}
+
+/// Read-only transcript reader. Streams the chosen caption track over
+/// HTTP, runs a tolerant VTT/SRT parser, and renders cues with timestamps.
+class _TranscriptSheet extends StatefulWidget {
+  const _TranscriptSheet({required this.caption, required this.onBack});
+
+  final StreamCaption caption;
+  final VoidCallback onBack;
+
+  @override
+  State<_TranscriptSheet> createState() => _TranscriptSheetState();
+}
+
+class _TranscriptSheetState extends State<_TranscriptSheet> {
+  late Future<List<_TranscriptCue>> _future = _load();
+
+  Future<List<_TranscriptCue>> _load() async {
+    final String? url = widget.caption.url;
+    if (url == null || url.isEmpty) {
+      return const <_TranscriptCue>[];
+    }
+    final http.Response response = await http
+        .get(Uri.parse(url))
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 200) {
+      throw Exception('Could not load transcript (${response.statusCode})');
+    }
+    return _parseCues(response.body);
+  }
+
+  static List<_TranscriptCue> _parseCues(String raw) {
+    final List<_TranscriptCue> out = <_TranscriptCue>[];
+    // Tolerant block split — VTT and SRT both separate cues with a blank
+    // line. Timestamps are matched with `-->` and trimmed of trailing
+    // styling info (`align:`, `position:` etc.).
+    final RegExp tsRe = RegExp(
+      r'(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})',
+    );
+    for (final String block in raw.split(RegExp(r'\r?\n\r?\n'))) {
+      final List<String> lines = block.split(RegExp(r'\r?\n'));
+      if (lines.isEmpty) {
+        continue;
+      }
+      String? start;
+      final List<String> textLines = <String>[];
+      for (final String line in lines) {
+        final RegExpMatch? m = tsRe.firstMatch(line);
+        if (m != null) {
+          start = m.group(1);
+          continue;
+        }
+        if (line.trim().isEmpty) {
+          continue;
+        }
+        if (start == null) {
+          // Skip cue numbers ("1", "2") and metadata ("WEBVTT").
+          if (line.trim().toUpperCase() == 'WEBVTT' ||
+              int.tryParse(line.trim()) != null) {
+            continue;
+          }
+          continue;
+        }
+        textLines.add(line);
+      }
+      if (start != null && textLines.isNotEmpty) {
+        out.add(
+          _TranscriptCue(
+            timestamp: start,
+            text: textLines.join('\n').replaceAll(RegExp(r'<[^>]+>'), ''),
+          ),
+        );
+      }
+    }
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.x4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              IconButton(
+                onPressed: widget.onBack,
+                icon: const Icon(Icons.arrow_back_rounded),
+              ),
+              Expanded(
+                child: Text(
+                  'Transcript',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        color: AppColors.typeEmphasis,
+                      ),
+                ),
+              ),
+              IconButton(
+                onPressed: () {
+                  setState(() {
+                    _future = _load();
+                  });
+                },
+                icon: const Icon(Icons.refresh_rounded),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.x2),
+          SizedBox(
+            height: MediaQuery.sizeOf(context).height * 0.5,
+            child: FutureBuilder<List<_TranscriptCue>>(
+              future: _future,
+              builder: (
+                BuildContext context,
+                AsyncSnapshot<List<_TranscriptCue>> snapshot,
+              ) {
+                if (snapshot.connectionState != ConnectionState.done) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (snapshot.hasError) {
+                  return Padding(
+                    padding: const EdgeInsets.all(AppSpacing.x4),
+                    child: Text(
+                      '${snapshot.error}',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  );
+                }
+                final List<_TranscriptCue> cues =
+                    snapshot.data ?? const <_TranscriptCue>[];
+                if (cues.isEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.all(AppSpacing.x4),
+                    child: Text(
+                      'Transcript is empty for the selected track.',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  );
+                }
+                return ListView.separated(
+                  itemCount: cues.length,
+                  separatorBuilder: (_, _) =>
+                      const SizedBox(height: AppSpacing.x2),
+                  itemBuilder: (BuildContext context, int index) {
+                    final _TranscriptCue cue = cues[index];
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.x2,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(
+                            cue.timestamp,
+                            style: Theme.of(context).textTheme.labelSmall
+                                ?.copyWith(color: AppColors.typeLink),
+                          ),
+                          const SizedBox(height: AppSpacing.x1),
+                          Text(
+                            cue.text,
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TranscriptCue {
+  const _TranscriptCue({required this.timestamp, required this.text});
+
+  final String timestamp;
+  final String text;
 }
