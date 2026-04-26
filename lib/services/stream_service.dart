@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:pstream_android/config/app_config.dart';
@@ -9,6 +10,12 @@ import 'package:pstream_android/models/stream_result.dart';
 
 class StreamService {
   const StreamService();
+
+  /// Some reverse proxies / WAFs reject Dart's default `User-Agent`; match a normal client.
+  static const Map<String, String> _oracleJsonHeaders = <String, String>{
+    'Accept': 'application/json',
+    'User-Agent': 'Veil/1.0 (Android; +https://github.com/dikshadamahe/veil-android)',
+  };
 
   Stream<ScrapeEvent> scrapeStream(
     MediaItem mediaItem, {
@@ -85,6 +92,7 @@ class StreamService {
             seasonTitle: seasonTitle,
           ),
         );
+        request.headers.addAll(_oracleJsonHeaders);
 
         final http.StreamedResponse response = await client
             .send(request)
@@ -234,31 +242,105 @@ class StreamService {
   }
 
   Future<ScrapeCatalog> fetchCatalog() async {
+    final CatalogFetchResult r = await fetchCatalogWithDiagnostics();
+    return r.catalog;
+  }
+
+  /// Same as [fetchCatalog] plus [failureReason] when the catalog is unusable.
+  Future<CatalogFetchResult> fetchCatalogWithDiagnostics() async {
+    final Uri uri = _baseUri('/sources');
+    if (!uri.hasScheme || uri.host.isEmpty) {
+      return CatalogFetchResult(
+        catalog: const ScrapeCatalog(),
+        failureReason:
+            'Invalid ORACLE_URL (need full URL like http://YOUR_IP:3001). Rebuild APK.',
+      );
+    }
+
     final http.Client client = http.Client();
     try {
       final http.Response response = await client
-          .get(_baseUri('/sources'))
+          .get(uri, headers: _oracleJsonHeaders)
           .timeout(const Duration(seconds: 15));
 
       if (response.statusCode != 200) {
-        return const ScrapeCatalog();
+        return CatalogFetchResult(
+          catalog: const ScrapeCatalog(),
+          failureReason:
+              'GET /sources → HTTP ${response.statusCode} from ${uri.host}:${uri.port}. '
+              'Compare: curl -sS "$uri"',
+        );
       }
 
-      final Map<String, dynamic> json = Map<String, dynamic>.from(
-        jsonDecode(response.body) as Map,
-      );
+      final dynamic decoded = jsonDecode(response.body);
+      if (decoded is! Map) {
+        return CatalogFetchResult(
+          catalog: const ScrapeCatalog(),
+          failureReason:
+              'GET /sources returned non-JSON object. First chars: '
+              '${_bodyPrefix(response.body)}',
+        );
+      }
 
-      return ScrapeCatalog(
-        sources: ((json['sources'] as List?) ?? const <dynamic>[])
-            .map((entry) => ScrapeSourceDefinition.fromJson(entry))
-            .toList(),
-        embeds: ((json['embeds'] as List?) ?? const <dynamic>[])
-            .map((entry) => ScrapeSourceDefinition.fromJson(entry))
-            .toList(),
+      final Map<String, dynamic> json = Map<String, dynamic>.from(decoded);
+      final List<ScrapeSourceDefinition> sources = ((json['sources'] as List?) ??
+              const <dynamic>[])
+          .map((dynamic entry) => ScrapeSourceDefinition.fromJson(entry))
+          .where((ScrapeSourceDefinition s) => s.id.isNotEmpty)
+          .toList();
+      final List<ScrapeSourceDefinition> embeds = ((json['embeds'] as List?) ??
+              const <dynamic>[])
+          .map((dynamic entry) => ScrapeSourceDefinition.fromJson(entry))
+          .where((ScrapeSourceDefinition s) => s.id.isNotEmpty)
+          .toList();
+
+      if (sources.isEmpty) {
+        return CatalogFetchResult(
+          catalog: ScrapeCatalog(sources: sources, embeds: embeds),
+          failureReason:
+              'GET /sources HTTP 200 but "sources" is empty after parse. '
+              'On Oracle check providers-api and @p-stream/providers listSources(). '
+              'Body prefix: ${_bodyPrefix(response.body)}',
+        );
+      }
+
+      return CatalogFetchResult(
+        catalog: ScrapeCatalog(sources: sources, embeds: embeds),
+      );
+    } on SocketException catch (e) {
+      return CatalogFetchResult(
+        catalog: const ScrapeCatalog(),
+        failureReason:
+            'Cannot reach ${uri.host}:${uri.port} from this device ($e). '
+            'Oracle security list / Wi‑Fi / VPN?',
+      );
+    } on TimeoutException {
+      return CatalogFetchResult(
+        catalog: const ScrapeCatalog(),
+        failureReason:
+            'Timed out loading /sources from ${uri.host}:${uri.port}.',
+      );
+    } on FormatException catch (e) {
+      return CatalogFetchResult(
+        catalog: const ScrapeCatalog(),
+        failureReason: 'Bad JSON from /sources: $e',
+      );
+    } catch (e) {
+      return CatalogFetchResult(
+        catalog: const ScrapeCatalog(),
+        failureReason: 'GET /sources failed: $e',
       );
     } finally {
       client.close();
     }
+  }
+
+  static String _bodyPrefix(String body, [int max = 120]) {
+    final String t = body.trim();
+    if (t.length <= max) {
+      return t;
+    }
+    return '${t.substring(0, max)}…';
   }
 
   Future<void> _emitBlockingFallback(
@@ -318,6 +400,7 @@ class StreamService {
               seasonTitle: seasonTitle,
               sourceOrder: sourceOrder,
             ),
+            headers: _oracleJsonHeaders,
           )
           .timeout(const Duration(seconds: 90));
 
@@ -383,6 +466,20 @@ class ScrapeCatalog {
 
   final List<ScrapeSourceDefinition> sources;
   final List<ScrapeSourceDefinition> embeds;
+}
+
+/// Result of [StreamService.fetchCatalogWithDiagnostics].
+class CatalogFetchResult {
+  const CatalogFetchResult({
+    required this.catalog,
+    this.failureReason,
+  });
+
+  final ScrapeCatalog catalog;
+  /// Set when [catalog.sources] is empty or the request could not complete.
+  final String? failureReason;
+
+  bool get hasSources => catalog.sources.isNotEmpty;
 }
 
 class _SseConnectionException implements Exception {

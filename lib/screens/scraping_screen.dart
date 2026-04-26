@@ -97,26 +97,27 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     await _fetchAndApplyCatalog();
   }
 
-  /// GET /sources on providers-api. Returns true when at least one source id
-  /// was merged (used after SSE delivered no catalog, or init was empty).
-  Future<bool> _fetchAndApplyCatalog() async {
-    try {
-      final ScrapeCatalog catalog = await _streamService.fetchCatalog();
-      if (!mounted) {
-        return false;
-      }
-
-      if (catalog.sources.isNotEmpty) {
-        _mergeSources(catalog.sources);
-      }
-
-      for (final ScrapeSourceDefinition embed in catalog.embeds) {
-        _embedNameByScraperId[embed.id] = embed.name;
-      }
-      return catalog.sources.isNotEmpty;
-    } catch (_) {
-      return false;
+  /// GET /sources on providers-api. Returns **null** if at least one source id
+  /// was merged; otherwise an error string for a [SnackBar].
+  Future<String?> _fetchAndApplyCatalog() async {
+    final CatalogFetchResult result =
+        await _streamService.fetchCatalogWithDiagnostics();
+    if (!mounted) {
+      return null;
     }
+
+    if (result.catalog.sources.isNotEmpty) {
+      _mergeSources(result.catalog.sources);
+    }
+
+    for (final ScrapeSourceDefinition embed in result.catalog.embeds) {
+      _embedNameByScraperId[embed.id] = embed.name;
+    }
+
+    if (result.hasSources) {
+      return null;
+    }
+    return result.failureReason ?? 'No sources in /sources response.';
   }
 
   void _startStreamScrape() {
@@ -242,6 +243,9 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
     setState(() {
       for (final ScrapeSourceDefinition source in sources) {
+        if (source.id.isEmpty) {
+          continue;
+        }
         if (!_nodes.containsKey(source.id)) {
           _nodes[source.id] = _ScrapeNode(id: source.id, name: source.name);
           _sourceOrder.add(source.id);
@@ -397,15 +401,16 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
   Future<void> _showManualPicker() async {
     if (_sourceOrder.isEmpty) {
-      final bool loaded = await _fetchAndApplyCatalog();
+      final String? catalogErr = await _fetchAndApplyCatalog();
       if (!mounted) {
         return;
       }
-      if (!loaded || _sourceOrder.isEmpty) {
+      if (catalogErr != null || _sourceOrder.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Text(
-              'No source list from server. On a PC run: curl YOUR_ORACLE_IP:3001/sources — the JSON "sources" array must not be empty. Check providers-api and SIMPLE_PROXY_URL on Oracle.',
+              catalogErr ??
+                  'No sources after /sources. Compare with curl on a PC.',
             ),
           ),
         );
@@ -659,9 +664,16 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
                                   }
                                 });
                                 if (_sourceOrder.isEmpty) {
-                                  await _fetchAndApplyCatalog();
+                                  final String? catalogErr =
+                                      await _fetchAndApplyCatalog();
                                   if (!mounted) {
                                     return;
+                                  }
+                                  if (catalogErr != null) {
+                                    ScaffoldMessenger.of(context)
+                                        .showSnackBar(
+                                      SnackBar(content: Text(catalogErr)),
+                                    );
                                   }
                                   setState(() {
                                     for (final String id in _sourceOrder) {

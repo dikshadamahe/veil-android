@@ -197,9 +197,14 @@ class ScrapeSourceDefinition {
       json as Map? ?? const <String, dynamic>{},
     );
 
+    final String idRaw =
+        '${map['id'] ?? map['sourceId'] ?? map['scraperId'] ?? ''}'.trim();
+
     return ScrapeSourceDefinition(
-      id: '${map['id'] ?? ''}',
-      name: '${map['name'] ?? map['embedScraperId'] ?? map['id'] ?? ''}'.trim(),
+      id: idRaw,
+      name:
+          '${map['name'] ?? map['embedScraperId'] ?? map['id'] ?? map['scraperId'] ?? ''}'
+              .trim(),
       embedScraperId: _parseNullableString(map['embedScraperId']),
     );
   }
