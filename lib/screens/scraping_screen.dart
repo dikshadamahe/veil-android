@@ -679,7 +679,7 @@ class _ScrapingHeader extends StatelessWidget {
         : (activeName != null
             ? 'Looking for streams'
             : (loading ? 'Looking for streams' : 'Preparing'));
-    final String? sub = allFailure
+    final String sub = allFailure
         ? 'Every source we tried did not work. Try again or pick one manually.'
         : (activeName != null
             ? 'Currently checking $activeName'
@@ -713,16 +713,14 @@ class _ScrapingHeader extends StatelessWidget {
             fontWeight: FontWeight.w700,
           ),
         ),
-        if (sub != null) ...<Widget>[
-          const SizedBox(height: AppSpacing.x2),
-          Text(
-            sub,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: AppColors.typeSecondary,
-            ),
+        const SizedBox(height: AppSpacing.x2),
+        Text(
+          sub,
+          textAlign: TextAlign.center,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: AppColors.typeSecondary,
           ),
-        ],
+        ),
       ],
     );
   }
