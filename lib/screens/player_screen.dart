@@ -23,7 +23,8 @@ import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/screens/scraping_screen.dart';
 import 'package:pstream_android/services/external_subtitle_service.dart';
-import 'package:pstream_android/services/stream_service.dart';
+import 'package:pstream_android/services/stream_service.dart'
+    show ScrapeCatalog, StreamService;
 import 'package:pstream_android/storage/local_storage.dart';
 import 'package:pstream_android/utils/player_native_tune.dart';
 import 'package:pstream_android/widgets/player_controls.dart';
@@ -58,6 +59,26 @@ class _MergedSubtitleLang {
   }
 }
 
+/// GET /sources `sources` plus `embeds`, deduped by id (embed-only scrapers).
+List<ScrapeSourceDefinition> _mergedCatalogSources(ScrapeCatalog? catalog) {
+  if (catalog == null) {
+    return const <ScrapeSourceDefinition>[];
+  }
+  final Map<String, ScrapeSourceDefinition> byId =
+      <String, ScrapeSourceDefinition>{};
+  for (final ScrapeSourceDefinition s in catalog.sources) {
+    if (s.id.isNotEmpty) {
+      byId.putIfAbsent(s.id, () => s);
+    }
+  }
+  for (final ScrapeSourceDefinition e in catalog.embeds) {
+    if (e.id.isNotEmpty) {
+      byId.putIfAbsent(e.id, () => e);
+    }
+  }
+  return byId.values.toList();
+}
+
 class PlayerScreenArgs {
   const PlayerScreenArgs({
     required this.mediaItem,
@@ -68,6 +89,7 @@ class PlayerScreenArgs {
     this.episodeTmdbId,
     this.seasonTitle,
     this.resumeFrom,
+    this.replaceEpoch,
   });
 
   final MediaItem mediaItem;
@@ -78,6 +100,11 @@ class PlayerScreenArgs {
   final String? episodeTmdbId;
   final String? seasonTitle;
   final int? resumeFrom;
+
+  /// Bumps on each [context.go] to `/player` so the route [ValueKey] changes
+  /// even when the server returns the same [StreamResult.sourceId] / URL for a
+  /// new scrape (e.g. provider always labels the row as “Vidlink”).
+  final int? replaceEpoch;
 }
 
 class PlayerScreen extends ConsumerStatefulWidget {
@@ -1013,7 +1040,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 builder: (BuildContext context, int _, Widget? child) {
                   return _PlayerSettingsHomeSheet(
                     qualityLabel: _currentQualityLabel,
-                    sourceLabel: widget.args.streamResult.sourceName,
+                    sourceLabel: _sourceLabelForSettings,
                     subtitleLabel: _currentSubtitleLabel,
                     onQualityTap: () async {
                       await _openQualitySheet();
@@ -1108,8 +1135,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   }
 
                   final List<ScrapeSourceDefinition> sources =
-                      snapshot.data?.sources ??
-                      const <ScrapeSourceDefinition>[];
+                      _mergedCatalogSources(snapshot.data);
 
                   return _PlayerOptionSheet(
                     title: 'Sources',
@@ -1146,7 +1172,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       ) {
                         return _SourcesCatalogSheet(
                           sources: sources,
-                          currentSourceId: widget.args.streamResult.sourceId,
+                          currentSourceId: _currentCatalogSourceId,
                           sourceProbeStatus: _sourceProbeStatus,
                           sourceProbeScanRunning: _sourceProbeScanRunning,
                           onCheckSources: () {
@@ -1166,7 +1192,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
 
     if (selectedSourceId == null ||
-        selectedSourceId == widget.args.streamResult.sourceId) {
+        selectedSourceId == _currentCatalogSourceId) {
       return;
     }
 
@@ -2685,8 +2711,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         episodeTmdbId: widget.args.episodeTmdbId,
         seasonTitle: widget.args.seasonTitle,
         resumeFrom: _position.inSeconds,
+        replaceEpoch: DateTime.now().microsecondsSinceEpoch,
       ),
     );
+  }
+
+  /// [ScrapeSourceDefinition.id] for the stream now playing: embed when set.
+  String get _currentCatalogSourceId {
+    final String? e = widget.args.streamResult.embedId;
+    if (e != null && e.trim().isNotEmpty) {
+      return e.trim();
+    }
+    return widget.args.streamResult.sourceId;
+  }
+
+  String get _sourceLabelForSettings {
+    final StreamResult r = widget.args.streamResult;
+    if (r.embedName != null && r.embedName!.trim().isNotEmpty) {
+      return r.embedName!.trim();
+    }
+    return r.sourceName;
   }
 
   String get _currentQualityLabel {

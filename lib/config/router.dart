@@ -148,7 +148,7 @@ final GoRouter appRouter = GoRouter(
         // Navigating to the same path with new [extra] alone would update the
         // widget without a key and leave the old video playing.
         return PlayerScreen(
-          key: ValueKey<String>(_playerStreamIdentity(args.streamResult)),
+          key: ValueKey<String>(_playerRouteKey(args)),
           args: args,
         );
       },
@@ -156,8 +156,15 @@ final GoRouter appRouter = GoRouter(
   ],
 );
 
-/// Stable identity for the active [StreamResult] so [GoRoute] `/player` can
-/// remount [PlayerScreen] when the user switches sources (new [extra]).
+/// Route key: [StreamResult] identity plus [PlayerScreenArgs.replaceEpoch] so a
+/// new scrape always remounts [PlayerScreen] even when the provider reuses the
+/// same [StreamResult.sourceId] or playback URL for different [sourceOrder] rows.
+String _playerRouteKey(PlayerScreenArgs args) {
+  final int epoch = args.replaceEpoch ?? 0;
+  return '${args.mediaItem.tmdbId}|$epoch|${_playerStreamIdentity(args.streamResult)}';
+}
+
+/// Stable stream identity (includes embed and URL) for [PlayerScreen] remounts.
 String _playerStreamIdentity(StreamResult r) {
   final String url = (r.stream.playbackUrl?.trim().isNotEmpty == true)
       ? r.stream.playbackUrl!.trim()
@@ -166,5 +173,7 @@ String _playerStreamIdentity(StreamResult r) {
           : ((r.stream.playlist?.trim().isNotEmpty == true)
               ? r.stream.playlist!.trim()
               : (r.stream.id?.trim() ?? '')));
-  return '${r.sourceId}|${r.sourceName}|$url';
+  final String embed =
+      (r.embedId != null && r.embedId!.trim().isNotEmpty) ? r.embedId!.trim() : '';
+  return '${r.sourceId}|$embed|${r.sourceName}|$url';
 }

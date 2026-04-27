@@ -564,6 +564,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
         episodeTmdbId: widget.episodeTmdbId,
         seasonTitle: widget.seasonTitle,
         resumeFrom: widget.resumeFrom,
+        replaceEpoch: DateTime.now().microsecondsSinceEpoch,
       ),
     );
   }
