@@ -1,7 +1,7 @@
 name: pstream_android
 description: "Veil is a minimalist Android streaming client with a self-hosted resolver stack."
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+1
 
 environment:
   sdk: ^3.10.4

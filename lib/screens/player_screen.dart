@@ -30,6 +30,33 @@ import 'package:screen_brightness/screen_brightness.dart';
 
 enum _PlayerEdgeSwipe { none, brightness, volume }
 
+/// Per-source probe result for the "check streams" UI.
+enum _SourceStreamStatus { unknown, loading, playable, none }
+
+/// One row in the subtitles sheet: embedded tracks + online offers for a language.
+class _MergedSubtitleLang {
+  const _MergedSubtitleLang({
+    required this.displayName,
+    required this.captions,
+    required this.offers,
+  });
+
+  final String displayName;
+  final List<StreamCaption> captions;
+  final List<ExternalSubtitleOffer> offers;
+
+  int get count => captions.length + offers.length;
+
+  String? get primaryLanguageCode {
+    for (final StreamCaption c in captions) {
+      if (c.language != null && c.language!.trim().isNotEmpty) {
+        return c.language;
+      }
+    }
+    return null;
+  }
+}
+
 class PlayerScreenArgs {
   const PlayerScreenArgs({
     required this.mediaItem,
@@ -79,6 +106,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Timer? _subtitleToastTimer;
   Timer? _gestureHintTimer;
 
+  /// Drives [ValueListenableBuilder] around the open player settings sheet.
+  /// Modal routes do not rebuild when this screen [setState]s, so the
+  /// Subtitles card must listen here to pick up [_currentSubtitleLabel].
+  final ValueNotifier<int> _playerSettingsLabelRev = ValueNotifier<int>(0);
+
   /// Software volume (0–150 after [applyNativePlaybackTune] raises `volume-max`).
   double _softwareVolume = 100;
   double _screenBrightness = 0.55;
@@ -101,6 +133,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _playerReady = false;
   bool _hasPlaybackError = false;
   bool _sourceSwitching = false;
+  /// When set, the matching [ExternalSubtitleOffer.id] is the active online track.
+  String? _activeExternalOfferId;
+  /// Short label for settings card when an online track is active.
+  String? _activeExternalSummary;
   bool _wasBackgrounded = false;
   String? _playbackError;
   int? _resumeFromOverride;
@@ -163,6 +199,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _progressTimer?.cancel();
     _subtitleToastTimer?.cancel();
     _gestureHintTimer?.cancel();
+    _playerSettingsLabelRev.dispose();
     unawaited(_restoreScreenBrightness());
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     SystemChrome.setEnabledSystemUIMode(
@@ -325,18 +362,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// Detect hearing-impaired captions from common provider markers. Most
   /// scrapers expose the flag in `raw['hearingImpaired']`, `raw['hi']`,
   /// or by appending "(SDH)" / "[CC]" to the label.
-  /// Pick the most reliable language code from a group of captions. The
-  /// first non-empty value wins so flags follow the dominant track.
-  static String? _languageCodeFor(List<StreamCaption> captions) {
-    for (final StreamCaption caption in captions) {
-      final String? code = caption.language;
-      if (code != null && code.trim().isNotEmpty) {
-        return code;
-      }
-    }
-    return null;
-  }
-
   static bool _isHearingImpaired(StreamCaption caption) {
     final dynamic raw = caption.raw;
     if (raw is Map) {
@@ -378,12 +403,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// Build a [SubtitleViewConfiguration] using live Hive prefs. Watching
   /// the Riverpod providers in [build] makes the [Video] widget rebuild
   /// the moment the user nudges a slider in the Customize sheet.
-  SubtitleViewConfiguration _buildSubtitleViewConfiguration(WidgetRef ref) {
+  ///
+  /// The player mounts a [SubtitleView] *above* [PlayerControls] so
+  /// subtitles are not covered; the [Video] child uses
+  /// [displayVisible] false to avoid painting two copies.
+  SubtitleViewConfiguration _buildSubtitleViewConfiguration(
+    WidgetRef ref, {
+    bool displayVisible = true,
+    bool liftAboveControlChrome = false,
+  }) {
     final int size = ref.watch(subtitleSizePrefProvider);
     final String colorHex = ref.watch(subtitleColorPrefProvider);
     final double bgOpacity = ref.watch(subtitleBgOpacityPrefProvider);
     final Color textColor = _hexToColorPlayer(colorHex);
+    // Keep lines readable above the bottom seek bar + icon row when the
+    // control chrome is visible; z-order is handled by the top SubtitleView.
+    final double bottom = AppSpacing.x6 +
+        (liftAboveControlChrome
+            ? AppSpacing.x20 + AppSpacing.x10
+            : 0.0);
     return SubtitleViewConfiguration(
+      visible: displayVisible,
       style: TextStyle(
         color: textColor,
         fontSize: size.toDouble(),
@@ -396,9 +436,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         ],
       ),
       textAlign: TextAlign.center,
-      padding: const EdgeInsets.symmetric(
-        horizontal: AppSpacing.x4,
-        vertical: AppSpacing.x6,
+      padding: EdgeInsets.fromLTRB(
+        AppSpacing.x4,
+        AppSpacing.x6,
+        AppSpacing.x4,
+        bottom,
       ),
     );
   }
@@ -437,6 +479,140 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     } catch (_) {
       return null;
     }
+  }
+
+  /// Resolves relative caption URLs against the active playlist / playback URL.
+  static Uri? _resolveStreamCaptionUri(String captionUrl, StreamPlayback playback) {
+    final String trimmed = captionUrl.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    final Uri? direct = Uri.tryParse(trimmed);
+    if (direct != null &&
+        direct.hasScheme &&
+        direct.scheme != 'file' &&
+        direct.host.isNotEmpty) {
+      return direct;
+    }
+    final String baseStr = (playback.proxiedPlaylist?.isNotEmpty == true
+            ? playback.proxiedPlaylist
+            : null) ??
+        (playback.playlist?.isNotEmpty == true ? playback.playlist : null) ??
+        (playback.playbackUrl?.isNotEmpty == true ? playback.playbackUrl : null) ??
+        '';
+    if (baseStr.isEmpty) {
+      return Uri.tryParse(trimmed);
+    }
+    try {
+      return Uri.parse(baseStr).resolve(trimmed);
+    } catch (_) {
+      return Uri.tryParse(trimmed);
+    }
+  }
+
+  /// Same header merge as transcript / HTTP subtitle fetch so CDNs see a browser-like client.
+  Map<String, String> _mergedSubtitleRequestHeaders(
+    StreamCaption caption,
+    StreamPlayback playback,
+  ) {
+    final Map<String, String> h = <String, String>{};
+    if (playback.preferredHeaders.isNotEmpty) {
+      h.addAll(playback.preferredHeaders);
+    } else {
+      h.addAll(playback.headers);
+    }
+    h.putIfAbsent('User-Agent', () => AppConfig.subtitleHttpUserAgent);
+    h.putIfAbsent('Accept', () => '*/*');
+    final dynamic raw = caption.raw;
+    if (raw is Map) {
+      for (final MapEntry<dynamic, dynamic> e in raw.entries) {
+        final String key = '${e.key}'.toLowerCase().trim();
+        final String? val = e.value?.toString().trim();
+        if (val == null || val.isEmpty) {
+          continue;
+        }
+        if (key == 'referer') {
+          h['Referer'] = val;
+        } else if (key == 'origin') {
+          h['Origin'] = val;
+        }
+      }
+    }
+    return h;
+  }
+
+  String _subtitleSuffixFromCaptionAndResponse(
+    StreamCaption caption,
+    http.Response response,
+  ) {
+    final String? ct = response.headers['content-type']?.toLowerCase();
+    if (ct != null && ct.contains('x-subrip')) {
+      return 'srt';
+    }
+    final String? u = caption.url?.toLowerCase();
+    if (u != null) {
+      if (u.endsWith('.vtt') || u.contains('.vtt?')) {
+        return 'vtt';
+      }
+      if (u.endsWith('.srt') || u.contains('.srt?')) {
+        return 'srt';
+      }
+    }
+    return 'vtt';
+  }
+
+  /// Loads remote captions through our HTTP stack (headers + UA) into cache so
+  /// libmpv reads a `file://` track — many hosts reject anonymous subtitle URLs.
+  Future<SubtitleTrack> _subtitleTrackForCaption(StreamCaption caption) async {
+    final StreamPlayback playback = widget.args.streamResult.stream;
+    final String rawUrl = caption.url?.trim() ?? '';
+    if (rawUrl.isEmpty) {
+      return SubtitleTrack.uri(
+        '',
+        title: caption.label ?? 'Subtitles',
+        language: caption.language ?? 'und',
+      );
+    }
+    final Uri? resolved = _resolveStreamCaptionUri(rawUrl, playback);
+    final String uriStr = resolved?.toString() ?? rawUrl;
+    if (resolved == null ||
+        !resolved.hasScheme ||
+        resolved.scheme == 'file' ||
+        (resolved.scheme != 'http' && resolved.scheme != 'https')) {
+      return SubtitleTrack.uri(
+        uriStr,
+        title: caption.label ?? caption.language ?? 'Subtitles',
+        language: caption.language ?? 'unknown',
+      );
+    }
+    final Map<String, String> headers =
+        _mergedSubtitleRequestHeaders(caption, playback);
+    try {
+      final http.Response r = await http
+          .get(resolved, headers: headers)
+          .timeout(const Duration(seconds: 28));
+      if (r.statusCode == 200 && r.bodyBytes.isNotEmpty) {
+        final String ext = _subtitleSuffixFromCaptionAndResponse(caption, r);
+        final String? path = await _writeSubtitleToCache(
+          suffix: ext,
+          bytes: r.bodyBytes,
+        );
+        if (path != null) {
+          return SubtitleTrack.uri(
+            'file://$path',
+            title: caption.label ?? caption.language ?? 'Subtitles',
+            language: caption.language ?? 'unknown',
+          );
+        }
+      }
+    } catch (_) {
+      // Fall through to direct URI (may still work for open CDNs).
+    }
+    return SubtitleTrack.uri(
+      uriStr,
+      title: caption.label ?? caption.language ?? 'Subtitles',
+      language: caption.language ?? 'unknown',
+    );
   }
 
   Future<void> _applyPlayerChrome() async {
@@ -483,10 +659,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
+      // Do not treat [inactive] as background: opening the notification shade,
+      // volume HUD, or brief focus loss fires [inactive] then [resumed] without
+      // [paused]. Re-opening the stream there restarts playback from scratch.
       case AppLifecycleState.hidden:
-      case AppLifecycleState.inactive:
       case AppLifecycleState.paused:
         _wasBackgrounded = true;
+        if (_position.inSeconds > 0) {
+          _resumeFromOverride = _position.inSeconds;
+        }
+        unawaited(_persistProgress());
+        break;
+      case AppLifecycleState.inactive:
         if (_position.inSeconds > 0) {
           _resumeFromOverride = _position.inSeconds;
         }
@@ -733,7 +917,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _showControls();
   }
 
-  Future<void> _seekRelative(int seconds) async {
+  Future<void> _seekRelative(int seconds, {bool showControls = true}) async {
     final int targetMs =
         ((_position.inMilliseconds + (seconds * 1000)).clamp(
                   0,
@@ -742,7 +926,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 as num)
             .toInt();
     await _player.seek(Duration(milliseconds: targetMs));
-    _showControls();
+    if (showControls) {
+      _showControls();
+    }
   }
 
   Future<void> _seekToFraction(double fraction) async {
@@ -783,12 +969,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     });
   }
 
+  void _notifyPlayerSettingsSubtitleLabel() {
+    if (!mounted) {
+      return;
+    }
+    _playerSettingsLabelRev.value = _playerSettingsLabelRev.value + 1;
+  }
+
   Future<T?> _showPlayerSheet<T>({required WidgetBuilder builder}) {
     return showModalBottomSheet<T>(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.transparent,
-      barrierColor: AppColors.blackC50.withValues(alpha: 0.82),
+      barrierColor: AppColors.transparent,
       builder: (BuildContext context) {
         return builder(context);
       },
@@ -805,21 +998,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return StatefulBuilder(
           builder: (BuildContext context, StateSetter setSheetState) {
             return _PlayerSheetScaffold(
-              child: _PlayerSettingsHomeSheet(
-                qualityLabel: _currentQualityLabel,
-                sourceLabel: widget.args.streamResult.sourceName,
-                subtitleLabel: _currentSubtitleLabel,
-                onQualityTap: () async {
-                  await _openQualitySheet();
-                  setSheetState(() {});
-                },
-                onSourceTap: () async {
-                  await _openSourceSheet();
-                  setSheetState(() {});
-                },
-                onSubtitlesTap: () async {
-                  await _openSubtitlesSheet();
-                  setSheetState(() {});
+              child: ValueListenableBuilder<int>(
+                valueListenable: _playerSettingsLabelRev,
+                builder: (BuildContext context, int _, Widget? child) {
+                  return _PlayerSettingsHomeSheet(
+                    qualityLabel: _currentQualityLabel,
+                    sourceLabel: widget.args.streamResult.sourceName,
+                    subtitleLabel: _currentSubtitleLabel,
+                    onQualityTap: () async {
+                      await _openQualitySheet();
+                      setSheetState(() {});
+                    },
+                    onSourceTap: () async {
+                      await _openSourceSheet();
+                      setSheetState(() {});
+                    },
+                    onSubtitlesTap: () async {
+                      await _openSubtitlesSheet();
+                      setSheetState(() {});
+                    },
+                  );
                 },
               ),
             );
@@ -875,19 +1073,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                         ),
                       );
                     },
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: sources.length,
-                      itemBuilder: (BuildContext context, int index) {
-                        final ScrapeSourceDefinition source = sources[index];
-                        final bool isCurrent =
-                            source.id == widget.args.streamResult.sourceId;
-
-                        return _PlayerOptionRow(
-                          title: source.name,
-                          selected: isCurrent,
-                          onTap: () => Navigator.of(context).pop(source.id),
+                    child: _SourcesCatalogSheet(
+                      sources: sources,
+                      currentSourceId: widget.args.streamResult.sourceId,
+                      probeSource: (String sourceId) {
+                        return _streamService.scrapeSingleSource(
+                          widget.args.mediaItem,
+                          sourceId: sourceId,
+                          season: widget.args.season,
+                          episode: widget.args.episode,
+                          seasonTmdbId: widget.args.seasonTmdbId,
+                          episodeTmdbId: widget.args.episodeTmdbId,
+                          seasonTitle: widget.args.seasonTitle,
                         );
+                      },
+                      isPlayable: (StreamResult? r) =>
+                          r != null && _streamResultHasPlayableUrl(r),
+                      onPick: (String sourceId) {
+                        Navigator.of(context).pop(sourceId);
                       },
                     ),
                   );
@@ -979,114 +1182,214 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
+  Future<OnlineSubtitleSearchResult> _loadOnlineSubtitleSearch() async {
+    final bool wantKeys =
+        AppConfig.hasWyzieApiKey || AppConfig.hasOpensubtitlesApiKey;
+    if (!wantKeys) {
+      return const OnlineSubtitleSearchResult(offers: <ExternalSubtitleOffer>[]);
+    }
+    return const ExternalSubtitleService().searchOnlineDetailed(
+      media: widget.args.mediaItem,
+      season: widget.args.season,
+      episode: widget.args.episode,
+    );
+  }
+
   Future<void> _openSubtitlesSheet() async {
     _showControls();
 
+    int searchGen = 0;
+    Future<OnlineSubtitleSearchResult> searchFuture = _loadOnlineSubtitleSearch();
+
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
-        // Sheet stays open across selections — picking Off / Auto / a
-        // language only flips the tick; "leaf" actions (file, paste,
-        // transcript, online search, customize) layer sub-sheets on top so
-        // back returns here.
         return StatefulBuilder(
           builder: (BuildContext context, StateSetter setSheetState) {
-            final Map<String, List<StreamCaption>> groupedCaptions =
-                _groupedCaptionsByLanguage;
+            final bool wantKeys =
+                AppConfig.hasWyzieApiKey || AppConfig.hasOpensubtitlesApiKey;
             return _PlayerSheetScaffold(
               child: _PlayerOptionSheet(
                 title: 'Subtitles',
-                trailingText: 'Customize',
-                onBack: () => Navigator.of(context).pop(),
-                onTrailingTap: () async {
-                  await _openCustomizeSubtitlesSheet();
-                  setSheetState(() {});
-                },
-                child: ListView(
-                  shrinkWrap: true,
+                titleTrailing: Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
-                    _PlayerOptionRow(
-                      title: 'Off',
-                      selected: !_subtitlesEnabled,
-                      onTap: () {
-                        _disableSubtitles();
-                        setSheetState(() {});
-                      },
-                    ),
-                    _PlayerOptionRow(
-                      title: 'Auto select',
-                      subtitle:
-                          'Tap again to auto select a different subtitle',
-                      selected: _subtitlesEnabled && _selectedCaption == null,
-                      onTap: () {
-                        _enableAutoSubtitles();
-                        setSheetState(() {});
-                      },
-                    ),
-                    _PlayerOptionRow(
-                      title: 'Drop or upload file',
-                      subtitle: '.srt or .vtt from this device',
-                      showChevron: true,
-                      onTap: () async {
-                        await _pickSubtitleFile();
-                        setSheetState(() {});
-                      },
-                    ),
-                    _PlayerOptionRow(
-                      title: 'Paste subtitle data',
-                      subtitle: 'Paste raw VTT or SRT text',
-                      showChevron: true,
-                      onTap: () async {
-                        await _openPasteSubtitleSheet();
-                        setSheetState(() {});
-                      },
-                    ),
-                    _PlayerOptionRow(
-                      title: 'Transcript',
-                      subtitle: _selectedCaption != null
-                          ? 'Read the active track as text'
-                          : 'Pick a subtitle first to read its transcript',
-                      showChevron: true,
-                      onTap: () async {
-                        if (_selectedCaption?.url?.isNotEmpty == true) {
-                          await _openTranscriptSheet(_selectedCaption!);
-                        } else {
-                          _setSubtitleState(
-                            enabled: _subtitlesEnabled,
-                            message:
-                                'Pick a subtitle track first to read transcript.',
-                          );
-                        }
-                        setSheetState(() {});
-                      },
-                    ),
-                    if (AppConfig.hasWyzieApiKey ||
-                        AppConfig.hasOpensubtitlesApiKey)
-                      _PlayerOptionRow(
-                        title: 'Search online…',
-                        subtitle: 'Wyzie & OpenSubtitles',
-                        showChevron: true,
-                        onTap: () async {
-                          await _openOnlineSubtitlesPicker();
-                          setSheetState(() {});
+                    if (wantKeys)
+                      IconButton(
+                        tooltip: 'Search again',
+                        onPressed: () {
+                          setSheetState(() {
+                            searchGen++;
+                            searchFuture = _loadOnlineSubtitleSearch();
+                          });
                         },
+                        icon: const Icon(Icons.refresh_rounded),
                       ),
-                    for (final MapEntry<String, List<StreamCaption>> entry
-                        in groupedCaptions.entries)
-                      _PlayerLanguageRow(
-                        flag: _flagForLanguage(_languageCodeFor(entry.value)),
-                        name: entry.key,
-                        count: entry.value.length,
-                        selected: _selectedCaption != null &&
-                            entry.value.contains(_selectedCaption),
-                        onTap: () async {
-                          await _openSubtitleLanguageSheet(
-                            entry.key,
-                            entry.value,
-                          );
-                          setSheetState(() {});
-                        },
-                      ),
+                    TextButton(
+                      onPressed: () async {
+                        await _openCustomizeSubtitlesSheet();
+                        setSheetState(() {});
+                      },
+                      child: const Text('Customize'),
+                    ),
                   ],
+                ),
+                onBack: () => Navigator.of(context).pop(),
+                child: FutureBuilder<OnlineSubtitleSearchResult>(
+                  key: ValueKey<int>(searchGen),
+                  future: searchFuture,
+                  builder: (
+                    BuildContext context,
+                    AsyncSnapshot<OnlineSubtitleSearchResult> snapshot,
+                  ) {
+                    final bool showOnlineSpinner = wantKeys &&
+                        snapshot.connectionState != ConnectionState.done;
+                    final OnlineSubtitleSearchResult? r = snapshot.data;
+                    final List<ExternalSubtitleOffer> offers =
+                        r?.offers ?? const <ExternalSubtitleOffer>[];
+                    final List<String> skipReasons =
+                        r?.skipReasons ?? const <String>[];
+                    final List<String> providerErrors =
+                        r?.providerErrors ?? const <String>[];
+                    final List<_MergedSubtitleLang> merged =
+                        _mergeSubtitleLanguages(offers);
+
+                    return ListView(
+                      shrinkWrap: true,
+                      children: <Widget>[
+                        if (!wantKeys) ...<Widget>[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(
+                              AppSpacing.x4,
+                              0,
+                              AppSpacing.x4,
+                              AppSpacing.x3,
+                            ),
+                            child: Text(
+                              'For OpenSubtitles and Wyzie, add WYZIE_API_KEY '
+                              'and/or OPENSUBTITLES_API_KEY to your build '
+                              '(--dart-define) and rebuild the app.',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(color: AppColors.typeSecondary),
+                            ),
+                          ),
+                        ] else if (skipReasons.isNotEmpty) ...<Widget>[
+                          for (final String s in skipReasons)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                AppSpacing.x4,
+                                0,
+                                AppSpacing.x4,
+                                AppSpacing.x2,
+                              ),
+                              child: Text(
+                                s,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(color: AppColors.typeSecondary),
+                              ),
+                            ),
+                        ] else if (offers.isEmpty && !showOnlineSpinner) ...<Widget>[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(
+                              AppSpacing.x4,
+                              0,
+                              AppSpacing.x4,
+                              AppSpacing.x2,
+                            ),
+                            child: Text(
+                              providerErrors.isNotEmpty
+                                  ? providerErrors.join(' ')
+                                  : 'No online files matched this title. '
+                                      'Touch the refresh icon to try again, '
+                                      'or use the web tracks from the source below.',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(color: AppColors.typeSecondary),
+                            ),
+                          ),
+                        ],
+                        _PlayerOptionRow(
+                          title: 'Off',
+                          selected: !_subtitlesEnabled,
+                          onTap: () {
+                            _disableSubtitles();
+                            setSheetState(() {});
+                          },
+                        ),
+                        _PlayerOptionRow(
+                          title: 'Drop or upload file',
+                          subtitle: '.srt or .vtt from this device',
+                          showChevron: true,
+                          onTap: () async {
+                            await _pickSubtitleFile();
+                            setSheetState(() {});
+                          },
+                        ),
+                        _PlayerOptionRow(
+                          title: 'Paste subtitle data',
+                          subtitle: 'Paste raw VTT or SRT text',
+                          showChevron: true,
+                          onTap: () async {
+                            await _openPasteSubtitleSheet();
+                            setSheetState(() {});
+                          },
+                        ),
+                        if (showOnlineSpinner) ...<Widget>[
+                          const SizedBox(height: AppSpacing.x3),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: AppSpacing.x4,
+                            ),
+                            child: LinearProgressIndicator(minHeight: 2),
+                          ),
+                          const SizedBox(height: AppSpacing.x3),
+                        ],
+                        if (snapshot.hasError)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: AppSpacing.x4,
+                              vertical: AppSpacing.x2,
+                            ),
+                            child: Text(
+                              'Online subtitles: ${snapshot.error}',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: AppColors.typeSecondary,
+                                  ),
+                            ),
+                          ),
+                        for (final _MergedSubtitleLang row in merged)
+                          _PlayerLanguageRow(
+                            flag: _flagForLanguage(row.primaryLanguageCode),
+                            name: row.displayName,
+                            count: row.count,
+                            selected: row.offers.any(
+                                  (ExternalSubtitleOffer o) =>
+                                      o.id == _activeExternalOfferId,
+                                ) ||
+                                (_selectedCaption != null &&
+                                    row.captions.any(
+                                      (StreamCaption c) =>
+                                          _captionMatchesSelected(c),
+                                    )),
+                            onTap: () async {
+                              await _openSubtitleLanguageSheet(
+                                row.displayName,
+                                row.captions,
+                                row.offers,
+                              );
+                              setSheetState(() {});
+                            },
+                          ),
+                      ],
+                    );
+                  },
                 ),
               ),
             );
@@ -1094,16 +1397,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         );
       },
     );
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _openSubtitleLanguageSheet(
     String language,
     List<StreamCaption> captions,
+    List<ExternalSubtitleOffer> onlineOffers,
   ) async {
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
         return StatefulBuilder(
           builder: (BuildContext context, StateSetter setSheetState) {
+            final int rowCount = captions.length + onlineOffers.length;
             return _PlayerSheetScaffold(
               child: _PlayerOptionSheet(
                 title: language,
@@ -1115,18 +1423,32 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 },
                 child: ListView.builder(
                   shrinkWrap: true,
-                  itemCount: captions.length,
+                  itemCount: rowCount,
                   itemBuilder: (BuildContext context, int index) {
-                    final StreamCaption caption = captions[index];
-                    final bool isSelected = caption == _selectedCaption;
+                    if (index < captions.length) {
+                      final StreamCaption caption = captions[index];
+                      final bool isSelected = _captionMatchesSelected(caption);
 
-                    return _PlayerCaptionRow(
-                      caption: caption,
+                      return _PlayerCaptionRow(
+                        caption: caption,
+                        selected: isSelected,
+                        flag: _flagForLanguage(caption.language),
+                        hearingImpaired: _isHearingImpaired(caption),
+                        onTap: () {
+                          _selectCaption(caption);
+                          setSheetState(() {});
+                        },
+                      );
+                    }
+                    final ExternalSubtitleOffer offer =
+                        onlineOffers[index - captions.length];
+                    final bool isSelected = offer.id == _activeExternalOfferId;
+                    return _PlayerExternalOfferRow(
+                      offer: offer,
+                      badge: _onlineSubtitleProviderBadge(offer),
                       selected: isSelected,
-                      flag: _flagForLanguage(caption.language),
-                      hearingImpaired: _isHearingImpaired(caption),
                       onTap: () {
-                        _selectCaption(caption);
+                        unawaited(_applyExternalSubtitleOffer(offer));
                         setSheetState(() {});
                       },
                     );
@@ -1192,6 +1514,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
 
       _selectedCaption = null;
+      _activeExternalOfferId = null;
+      _activeExternalSummary = null;
       _subtitlesEnabled = true;
       await _player.setSubtitleTrack(
         SubtitleTrack.uri(
@@ -1303,6 +1627,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
 
     _selectedCaption = null;
+    _activeExternalOfferId = null;
+    _activeExternalSummary = null;
     _subtitlesEnabled = true;
     try {
       await _player.setSubtitleTrack(
@@ -1321,28 +1647,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         );
       }
     }
-  }
-
-  /// Read-only transcript viewer. Fetches the selected track, parses cue
-  /// lines, and renders them as a scrollable list with timestamps. Stream
-  /// preferred headers are forwarded so providers that gate captions
-  /// behind referrer/origin checks still serve the file.
-  Future<void> _openTranscriptSheet(StreamCaption caption) async {
-    final StreamPlayback playback = widget.args.streamResult.stream;
-    final Map<String, String> headers = playback.preferredHeaders.isNotEmpty
-        ? playback.preferredHeaders
-        : playback.headers;
-    await _showPlayerSheet<void>(
-      builder: (BuildContext context) {
-        return _PlayerSheetScaffold(
-          child: _TranscriptSheet(
-            caption: caption,
-            headers: headers,
-            onBack: () => Navigator.of(context).pop(),
-          ),
-        );
-      },
-    );
   }
 
   /// Customize the on-screen subtitle render: font size, text color, and
@@ -1379,49 +1683,23 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
-  Future<void> _openOnlineSubtitlesPicker() async {
-    _showControls();
-    if (!AppConfig.hasWyzieApiKey && !AppConfig.hasOpensubtitlesApiKey) {
-      _setSubtitleState(
-        enabled: _subtitlesEnabled,
-        message: 'Add WYZIE_API_KEY or OPENSUBTITLES_API_KEY to your build',
-      );
-      return;
-    }
-
-    if (widget.args.mediaItem.isShow &&
-        (widget.args.season == null || widget.args.episode == null)) {
-      _setSubtitleState(
-        enabled: _subtitlesEnabled,
-        message: 'Episode context required for online subtitles',
-      );
-      return;
-    }
-
-    await _showPlayerSheet<void>(
-      builder: (BuildContext context) {
-        return _PlayerSheetScaffold(
-          child: _OnlineSubtitleSearchSheet(
-            mediaItem: widget.args.mediaItem,
-            season: widget.args.season,
-            episode: widget.args.episode,
-            onBack: () => Navigator.of(context).pop(),
-            onPick: (ExternalSubtitleOffer offer) async {
-              Navigator.of(context).pop();
-              await _applyExternalSubtitleOffer(offer);
-            },
-          ),
-        );
-      },
-    );
-  }
-
   Future<void> _applyExternalSubtitleOffer(ExternalSubtitleOffer offer) async {
     if (!mounted) {
       return;
     }
 
     try {
+      _selectedCaption = null;
+      _activeExternalOfferId = offer.id;
+      _activeExternalSummary = offer.languageLabel.trim().isNotEmpty
+          ? offer.languageLabel
+          : offer.title;
+      _subtitlesEnabled = true;
+      if (mounted) {
+        setState(() {});
+      }
+      _notifyPlayerSettingsSubtitleLabel();
+
       String? url = offer.directUrl;
       if (offer.opensubtitlesFileId != null) {
         const ExternalSubtitleService service = ExternalSubtitleService();
@@ -1431,11 +1709,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
 
       if (url == null || url.isEmpty) {
-        if (!mounted) {
-          return;
+        if (mounted) {
+          setState(() {
+            _activeExternalOfferId = null;
+            _activeExternalSummary = null;
+            _subtitlesEnabled = false;
+          });
         }
         _setSubtitleState(
-          enabled: _subtitlesEnabled,
+          enabled: false,
           message:
               'Could not open subtitle (try OPENSUBTITLES_USERNAME/PASSWORD for OpenSubtitles)',
         );
@@ -1446,8 +1728,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return;
       }
 
-      _selectedCaption = null;
-      _subtitlesEnabled = true;
       await _player.setSubtitleTrack(
         SubtitleTrack.uri(
           url,
@@ -1459,8 +1739,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _showControls();
     } catch (_) {
       if (mounted) {
+        setState(() {
+          _activeExternalOfferId = null;
+          _activeExternalSummary = null;
+          _subtitlesEnabled = false;
+        });
         _setSubtitleState(
-          enabled: _subtitlesEnabled,
+          enabled: false,
           message: 'Subtitle failed',
         );
       }
@@ -1474,7 +1759,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
     setState(() {
       _sourceSwitching = true;
-      _buffering = true;
     });
 
     try {
@@ -1496,7 +1780,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (result == null) {
         setState(() {
           _sourceSwitching = false;
-          _buffering = false;
         });
         _setSubtitleState(
           enabled: _subtitlesEnabled,
@@ -1505,29 +1788,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return;
       }
 
-      await Navigator.of(context).pushReplacement(
-        MaterialPageRoute<void>(
-          builder: (_) => PlayerScreen(
-            args: PlayerScreenArgs(
-              mediaItem: widget.args.mediaItem,
-              streamResult: result,
-              season: widget.args.season,
-              episode: widget.args.episode,
-              seasonTmdbId: widget.args.seasonTmdbId,
-              episodeTmdbId: widget.args.episodeTmdbId,
-              seasonTitle: widget.args.seasonTitle,
-              resumeFrom: _position.inSeconds,
-            ),
-          ),
-        ),
-      );
+      if (!_streamResultHasPlayableUrl(result)) {
+        setState(() {
+          _sourceSwitching = false;
+        });
+        _setSubtitleState(
+          enabled: _subtitlesEnabled,
+          message: 'Source returned no playable URL',
+        );
+        return;
+      }
+
+      _navigateReplacePlayerWithResult(result);
     } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _sourceSwitching = false;
-        _buffering = false;
       });
       _setSubtitleState(
         enabled: _subtitlesEnabled,
@@ -1568,13 +1846,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     final double thirdLeft = width * 0.35;
     final double thirdRight = width * 0.65;
     if (x < thirdLeft) {
-      unawaited(_seekRelative(-seekSecs));
+      unawaited(_seekRelative(-seekSecs, showControls: false));
       _flashGestureHint(
         icon: _doubleTapSeekIcon(-seekSecs),
         label: '-${seekSecs}s',
       );
     } else if (x > thirdRight) {
-      unawaited(_seekRelative(seekSecs));
+      unawaited(_seekRelative(seekSecs, showControls: false));
       _flashGestureHint(
         icon: _doubleTapSeekIcon(seekSecs),
         label: '+${seekSecs}s',
@@ -2030,13 +2308,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                             fill: AppColors.blackC50,
                             // Flutter-side subtitle render. media_kit pushes
                             // the active text track to `_player.stream.subtitle`
-                            // and SubtitleView paints it with the
-                            // [TextStyle] below — guaranteed independent of
-                            // libmpv's hardware decode path. Style is read
-                            // live from Hive prefs so the Customize sheet
-                            // updates immediately.
+                            // and SubtitleView paints it; the visible instance
+                            // is stacked *above* [PlayerControls] so it is not
+                            // covered by the control chrome.
                             subtitleViewConfiguration:
-                                _buildSubtitleViewConfiguration(ref),
+                                _buildSubtitleViewConfiguration(
+                              ref,
+                              displayVisible: false,
+                            ),
                           )
                         : const SizedBox.shrink(),
                   ),
@@ -2047,17 +2326,23 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                           message: _playbackError ?? 'Playback failed.',
                         )
                       : _sourceSwitching
-                      ? Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: <Widget>[
-                            const CircularProgressIndicator(),
-                            const SizedBox(height: AppSpacing.x3),
-                            Text(
-                              'Switching source...',
-                              style: Theme.of(context).textTheme.titleMedium
-                                  ?.copyWith(color: AppColors.typeEmphasis),
-                            ),
-                          ],
+                      ? Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: AppSpacing.x10,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              const LinearProgressIndicator(minHeight: 3),
+                              const SizedBox(height: AppSpacing.x4),
+                              Text(
+                                'Switching source…',
+                                textAlign: TextAlign.center,
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(color: AppColors.typeEmphasis),
+                              ),
+                            ],
+                          ),
                         )
                       : !_playerReady
                       ? Column(
@@ -2082,7 +2367,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                         )
                       : const SizedBox.shrink(),
                 ),
-                if (_buffering && !_hasPlaybackError)
+                if (_buffering && !_hasPlaybackError && !_sourceSwitching)
                   const Center(
                     child: RepaintBoundary(child: CircularProgressIndicator()),
                   ),
@@ -2156,9 +2441,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 PlayerControls(
                   visible: _controlsVisible && !_controlsLocked,
                   mediaTitle: title,
-                  sourceLabel:
-                      widget.args.streamResult.embedName ??
-                      widget.args.streamResult.sourceName,
                   isPlaying: _playing,
                   position: _position,
                   duration: _duration,
@@ -2185,6 +2467,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   onLock: _lockControls,
                   onNextEpisode: _playNextEpisode,
                 ),
+                if (_playerReady)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: SubtitleView(
+                        controller: _videoController,
+                        configuration: _buildSubtitleViewConfiguration(
+                          ref,
+                          liftAboveControlChrome:
+                              _controlsVisible && !_controlsLocked,
+                        ),
+                      ),
+                    ),
+                  ),
                 if (_controlsLocked)
                   Positioned(
                     top: AppSpacing.x4,
@@ -2242,6 +2537,96 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return grouped;
   }
 
+  static String _subtitleLanguageBucket(String raw) {
+    final String t = raw.trim().toLowerCase();
+    return t.isEmpty ? 'unknown' : t;
+  }
+
+  /// Wyzie vs OpenSubtitles chip for merged subtitle rows.
+  static String _onlineSubtitleProviderBadge(ExternalSubtitleOffer offer) {
+    final String haystack =
+        '${offer.providerLabel} ${offer.title}'.toLowerCase();
+    if (haystack.contains('wyzie')) {
+      return 'W';
+    }
+    if (haystack.contains('opensubtitles') || haystack.contains('open subtitle')) {
+      return 'O';
+    }
+    return '?';
+  }
+
+  List<_MergedSubtitleLang> _mergeSubtitleLanguages(
+    List<ExternalSubtitleOffer> offers,
+  ) {
+    final Map<String, _MergedSubtitleLang> map = <String, _MergedSubtitleLang>{};
+
+    for (final MapEntry<String, List<StreamCaption>> e
+        in _groupedCaptionsByLanguage.entries) {
+      final String b = _subtitleLanguageBucket(e.key);
+      map[b] = _MergedSubtitleLang(
+        displayName: e.key,
+        captions: List<StreamCaption>.from(e.value),
+        offers: <ExternalSubtitleOffer>[],
+      );
+    }
+
+    for (final ExternalSubtitleOffer o in offers) {
+      final String rawLang =
+          o.languageLabel.trim().isEmpty ? 'Unknown' : o.languageLabel.trim();
+      final String b = _subtitleLanguageBucket(rawLang);
+      final _MergedSubtitleLang? cur = map[b];
+      if (cur != null) {
+        map[b] = _MergedSubtitleLang(
+          displayName: cur.displayName,
+          captions: cur.captions,
+          offers: <ExternalSubtitleOffer>[...cur.offers, o],
+        );
+      } else {
+        map[b] = _MergedSubtitleLang(
+          displayName: rawLang,
+          captions: const <StreamCaption>[],
+          offers: <ExternalSubtitleOffer>[o],
+        );
+      }
+    }
+
+    final List<_MergedSubtitleLang> list = map.values.toList();
+    list.sort(
+      (a, b) => a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()),
+    );
+    return list;
+  }
+
+  bool _streamResultHasPlayableUrl(StreamResult result) {
+    return _resolvePlayableUrl(result.stream) != null;
+  }
+
+  void _navigateReplacePlayerWithResult(StreamResult result) {
+    if (!mounted) {
+      return;
+    }
+    // Do not await: [pushReplacement]'s future completes when the *new* route
+    // is popped, which would stall this screen until the user exits the player.
+    unawaited(
+      Navigator.of(context, rootNavigator: true).pushReplacement(
+        MaterialPageRoute<void>(
+          builder: (_) => PlayerScreen(
+            args: PlayerScreenArgs(
+              mediaItem: widget.args.mediaItem,
+              streamResult: result,
+              season: widget.args.season,
+              episode: widget.args.episode,
+              seasonTmdbId: widget.args.seasonTmdbId,
+              episodeTmdbId: widget.args.episodeTmdbId,
+              seasonTitle: widget.args.seasonTitle,
+              resumeFrom: _position.inSeconds,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   String get _currentQualityLabel {
     return _selectedQualityKey ??
         widget.args.streamResult.stream.selectedQuality ??
@@ -2254,9 +2639,52 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (!_subtitlesEnabled) {
       return 'Off';
     }
-    return _selectedCaption?.label ??
-        _selectedCaption?.language ??
-        (_availableCaptions.isNotEmpty ? 'Auto' : 'Embedded');
+    if (_activeExternalOfferId != null) {
+      final String s = _activeExternalSummary?.trim() ?? '';
+      if (s.isNotEmpty) {
+        return s;
+      }
+      return 'Online';
+    }
+    if (_selectedCaption != null) {
+      return _displayLabelForSelectedCaption(_selectedCaption!);
+    }
+    return 'On';
+  }
+
+  /// Settings card + consistent naming with the per-language sheet (e.g. "English").
+  String _displayLabelForSelectedCaption(StreamCaption c) {
+    for (final MapEntry<String, List<StreamCaption>> e
+        in _groupedCaptionsByLanguage.entries) {
+      for (final StreamCaption x in e.value) {
+        if (identical(c, x) || _sameCaptionUrl(c, x)) {
+          return e.key;
+        }
+      }
+    }
+    final String? lab = c.label?.trim();
+    if (lab != null && lab.isNotEmpty) {
+      return lab;
+    }
+    final String? lang = c.language?.trim();
+    if (lang != null && lang.isNotEmpty) {
+      return lang;
+    }
+    return 'On';
+  }
+
+  static bool _sameCaptionUrl(StreamCaption a, StreamCaption b) {
+    final String? au = a.url?.trim();
+    final String? bu = b.url?.trim();
+    return au != null && au.isNotEmpty && au == bu;
+  }
+
+  bool _captionMatchesSelected(StreamCaption c) {
+    final StreamCaption? s = _selectedCaption;
+    if (s == null) {
+      return false;
+    }
+    return identical(s, c) || _sameCaptionUrl(s, c);
   }
 
   Future<void> _applySelectedSubtitleTrack() async {
@@ -2267,13 +2695,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
     if (_selectedCaption?.url?.isNotEmpty == true) {
       final StreamCaption caption = _selectedCaption!;
-      await _player.setSubtitleTrack(
-        SubtitleTrack.uri(
-          caption.url!,
-          title: caption.label ?? caption.language ?? 'Subtitles',
-          language: caption.language ?? 'unknown',
-        ),
-      );
+      final SubtitleTrack track = await _subtitleTrackForCaption(caption);
+      await _player.setSubtitleTrack(track);
       return;
     }
 
@@ -2285,13 +2708,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (_availableCaptions.isNotEmpty) {
       final StreamCaption caption = _availableCaptions.first;
       _selectedCaption = caption;
-      await _player.setSubtitleTrack(
-        SubtitleTrack.uri(
-          caption.url!,
-          title: caption.label ?? caption.language ?? 'Subtitles',
-          language: caption.language ?? 'unknown',
-        ),
-      );
+      final SubtitleTrack track = await _subtitleTrackForCaption(caption);
+      await _player.setSubtitleTrack(track);
       return;
     }
 
@@ -2334,23 +2752,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _disableSubtitles() async {
     _selectedCaption = null;
+    _activeExternalOfferId = null;
+    _activeExternalSummary = null;
     await _player.setSubtitleTrack(SubtitleTrack.no());
     _setSubtitleState(enabled: false, message: 'Subtitles off');
-    _showControls();
-  }
-
-  Future<void> _enableAutoSubtitles() async {
-    _selectedCaption = null;
-
-    if (_availableCaptions.isEmpty && _player.state.tracks.subtitle.isEmpty) {
-      _setSubtitleState(enabled: false, message: 'No subtitles available');
-      _showControls();
-      return;
-    }
-
-    _subtitlesEnabled = true;
-    await _applySelectedSubtitleTrack();
-    _setSubtitleState(enabled: true, message: 'Subtitles auto');
     _showControls();
   }
 
@@ -2361,16 +2766,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
 
     _selectedCaption = caption;
-    await _player.setSubtitleTrack(
-      SubtitleTrack.uri(
-        caption.url!,
-        title: caption.label ?? caption.language ?? 'Subtitles',
-        language: caption.language ?? 'unknown',
-      ),
-    );
+    _activeExternalOfferId = null;
+    _activeExternalSummary = null;
+    _subtitlesEnabled = true;
+    if (mounted) {
+      setState(() {});
+    }
+    _notifyPlayerSettingsSubtitleLabel();
+    final SubtitleTrack track = await _subtitleTrackForCaption(caption);
+    if (!mounted) {
+      return;
+    }
+    await _player.setSubtitleTrack(track);
     _setSubtitleState(
       enabled: true,
-      message: caption.label ?? caption.language ?? 'Subtitles on',
+      message: _displayLabelForSelectedCaption(caption),
     );
     _showControls();
   }
@@ -2384,6 +2794,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _subtitlesEnabled = enabled;
       _subtitleToast = message;
     });
+    _notifyPlayerSettingsSubtitleLabel();
 
     _subtitleToastTimer?.cancel();
     _subtitleToastTimer = Timer(const Duration(milliseconds: 1400), () {
@@ -2497,6 +2908,186 @@ class _NextEpisodeTarget {
   final int season;
   final int episode;
   final String label;
+}
+
+/// Source list with optional per-source scrape probe (tick / cross only — no auto-switch).
+class _SourcesCatalogSheet extends StatefulWidget {
+  const _SourcesCatalogSheet({
+    required this.sources,
+    required this.currentSourceId,
+    required this.probeSource,
+    required this.isPlayable,
+    required this.onPick,
+  });
+
+  final List<ScrapeSourceDefinition> sources;
+  final String currentSourceId;
+  final Future<StreamResult?> Function(String sourceId) probeSource;
+  final bool Function(StreamResult? result) isPlayable;
+  final void Function(String sourceId) onPick;
+
+  @override
+  State<_SourcesCatalogSheet> createState() => _SourcesCatalogSheetState();
+}
+
+class _SourcesCatalogSheetState extends State<_SourcesCatalogSheet> {
+  final Map<String, _SourceStreamStatus> _status = <String, _SourceStreamStatus>{};
+  bool _scanRunning = false;
+
+  Future<void> _runProbe() async {
+    if (_scanRunning) {
+      return;
+    }
+    setState(() {
+      _scanRunning = true;
+    });
+    for (final ScrapeSourceDefinition s in widget.sources) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _status[s.id] = _SourceStreamStatus.loading;
+      });
+      try {
+        final StreamResult? r = await widget.probeSource(s.id);
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _status[s.id] = widget.isPlayable(r)
+              ? _SourceStreamStatus.playable
+              : _SourceStreamStatus.none;
+        });
+      } catch (_) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _status[s.id] = _SourceStreamStatus.none;
+        });
+      }
+    }
+    if (mounted) {
+      setState(() {
+        _scanRunning = false;
+      });
+    }
+  }
+
+  Widget _trailing(String sourceId) {
+    final _SourceStreamStatus st =
+        _status[sourceId] ?? _SourceStreamStatus.unknown;
+    switch (st) {
+      case _SourceStreamStatus.unknown:
+        return const SizedBox(width: AppSpacing.x8);
+      case _SourceStreamStatus.loading:
+        return const SizedBox(
+          width: AppSpacing.x6,
+          height: AppSpacing.x6,
+          child: Padding(
+            padding: EdgeInsets.all(2),
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        );
+      case _SourceStreamStatus.playable:
+        return const Icon(
+          Icons.check_circle_rounded,
+          color: AppColors.typeEmphasis,
+        );
+      case _SourceStreamStatus.none:
+        return const Icon(
+          Icons.cancel_rounded,
+          color: AppColors.videoContextError,
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Expanded(
+          child: ListView.builder(
+            primary: false,
+            shrinkWrap: true,
+            itemCount: widget.sources.length,
+            itemBuilder: (BuildContext context, int index) {
+              final ScrapeSourceDefinition source = widget.sources[index];
+              final bool isCurrent = source.id == widget.currentSourceId;
+              return Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () => widget.onPick(source.id),
+                  borderRadius: BorderRadius.circular(AppSpacing.x4),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.x2,
+                      vertical: AppSpacing.x3,
+                    ),
+                    child: Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              Text(
+                                source.name,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleMedium
+                                    ?.copyWith(
+                                      color: isCurrent
+                                          ? AppColors.typeEmphasis
+                                          : AppColors.typeText,
+                                    ),
+                              ),
+                              if (isCurrent)
+                                Text(
+                                  'Now playing',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .labelSmall
+                                      ?.copyWith(color: AppColors.typeSecondary),
+                                ),
+                            ],
+                          ),
+                        ),
+                        if (isCurrent)
+                          const Padding(
+                            padding: EdgeInsets.only(right: AppSpacing.x2),
+                            child: Icon(
+                              Icons.check_circle_rounded,
+                              color: AppColors.purpleC100,
+                            ),
+                          ),
+                        _trailing(source.id),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const Divider(color: AppColors.utilsDivider, height: AppSpacing.x4),
+        Text(
+          'Checks each source for this title/episode. '
+          'Tick = a playable stream was returned. Cross = none. Does not change the active source.',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: AppColors.typeSecondary,
+              ),
+        ),
+        const SizedBox(height: AppSpacing.x2),
+        TextButton(
+          onPressed: _scanRunning ? null : _runProbe,
+          child: Text(
+            _scanRunning ? 'Checking…' : 'Check which sources have streams',
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _PlayerSheetScaffold extends StatelessWidget {
@@ -2707,8 +3298,8 @@ class _PlayerOptionSheet extends StatelessWidget {
     required this.onBack,
     this.footer,
     this.trailingText,
-    this.trailingIcon,
     this.onTrailingTap,
+    this.titleTrailing,
   });
 
   final String title;
@@ -2716,8 +3307,8 @@ class _PlayerOptionSheet extends StatelessWidget {
   final VoidCallback onBack;
   final Widget? footer;
   final String? trailingText;
-  final IconData? trailingIcon;
   final VoidCallback? onTrailingTap;
+  final Widget? titleTrailing;
 
   @override
   Widget build(BuildContext context) {
@@ -2742,13 +3333,13 @@ class _PlayerOptionSheet extends StatelessWidget {
                   ),
                 ),
               ),
-              if (trailingText != null)
+              if (titleTrailing != null)
+                titleTrailing!
+              else if (trailingText != null)
                 TextButton(
                   onPressed: onTrailingTap,
                   child: Text(trailingText!),
                 ),
-              if (trailingIcon != null)
-                IconButton(onPressed: onTrailingTap, icon: Icon(trailingIcon)),
             ],
           ),
           const SizedBox(height: AppSpacing.x3),
@@ -2842,134 +3433,80 @@ class _PlayerOptionRow extends StatelessWidget {
   }
 }
 
-class _OnlineSubtitleSearchSheet extends StatefulWidget {
-  const _OnlineSubtitleSearchSheet({
-    required this.mediaItem,
-    required this.season,
-    required this.episode,
-    required this.onBack,
-    required this.onPick,
+/// OpenSubtitles / Wyzie row in the per-language subtitle sheet (O / W badge).
+class _PlayerExternalOfferRow extends StatelessWidget {
+  const _PlayerExternalOfferRow({
+    required this.offer,
+    required this.badge,
+    required this.selected,
+    required this.onTap,
   });
 
-  final MediaItem mediaItem;
-  final int? season;
-  final int? episode;
-  final VoidCallback onBack;
-  final Future<void> Function(ExternalSubtitleOffer offer) onPick;
-
-  @override
-  State<_OnlineSubtitleSearchSheet> createState() =>
-      _OnlineSubtitleSearchSheetState();
-}
-
-class _OnlineSubtitleSearchSheetState
-    extends State<_OnlineSubtitleSearchSheet> {
-  late Future<List<ExternalSubtitleOffer>> _future;
-
-  @override
-  void initState() {
-    super.initState();
-    _future = _loadOffers();
-  }
-
-  Future<List<ExternalSubtitleOffer>> _loadOffers() {
-    return const ExternalSubtitleService().searchOnline(
-      media: widget.mediaItem,
-      season: widget.season,
-      episode: widget.episode,
-    );
-  }
+  final ExternalSubtitleOffer offer;
+  final String badge;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return _PlayerOptionSheet(
-      title: 'Online subtitles',
-      trailingIcon: Icons.sync_alt_rounded,
-      onBack: widget.onBack,
-      onTrailingTap: () {
-        setState(() {
-          _future = _loadOffers();
-        });
-      },
-      child: FutureBuilder<List<ExternalSubtitleOffer>>(
-        future: _future,
-        builder:
-            (
-              BuildContext context,
-              AsyncSnapshot<List<ExternalSubtitleOffer>> snapshot,
-            ) {
-              if (snapshot.connectionState != ConnectionState.done) {
-                return const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(AppSpacing.x8),
-                    child: CircularProgressIndicator(),
-                  ),
-                );
-              }
-              if (snapshot.hasError) {
-                return Padding(
-                  padding: const EdgeInsets.all(AppSpacing.x5),
-                  child: Text(
-                    '${snapshot.error}',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: AppColors.typeText),
-                  ),
-                );
-              }
-              final List<ExternalSubtitleOffer> offers =
-                  snapshot.data ?? const <ExternalSubtitleOffer>[];
-              if (offers.isEmpty) {
-                return Padding(
-                  padding: const EdgeInsets.all(AppSpacing.x5),
-                  child: Text(
-                    'No online subtitles found. Check keys or try another episode.',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: AppColors.typeText),
-                  ),
-                );
-              }
-              return ListView.separated(
-                padding: const EdgeInsets.only(bottom: AppSpacing.x4),
-                itemCount: offers.length,
-                separatorBuilder: (BuildContext context, int index) =>
-                    const SizedBox(height: AppSpacing.x2),
-                itemBuilder: (BuildContext context, int index) {
-                  final ExternalSubtitleOffer offer = offers[index];
-                  return Material(
-                    color: AppColors.dropdownAltBackground,
-                    borderRadius: BorderRadius.circular(AppSpacing.x4),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(AppSpacing.x4),
-                      onTap: () => widget.onPick(offer),
-                      child: Padding(
-                        padding: const EdgeInsets.all(AppSpacing.x4),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            Text(
-                              offer.title,
-                              style: Theme.of(context).textTheme.titleSmall
-                                  ?.copyWith(
-                                    color: AppColors.typeEmphasis,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                            ),
-                            const SizedBox(height: AppSpacing.x2),
-                            Text(
-                              '${offer.languageLabel} · ${offer.providerLabel}',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: AppColors.typeSecondary),
-                            ),
-                          ],
-                        ),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AppSpacing.x4),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.x2,
+            vertical: AppSpacing.x3,
+          ),
+          child: Row(
+            children: <Widget>[
+              Container(
+                width: AppSpacing.x10,
+                height: AppSpacing.x10,
+                decoration: BoxDecoration(
+                  color: AppColors.blackC125,
+                  borderRadius: BorderRadius.circular(AppSpacing.x3),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  badge,
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: AppColors.typeEmphasis,
+                        fontWeight: FontWeight.w800,
                       ),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.x3),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      offer.title,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            color: AppColors.typeEmphasis,
+                          ),
                     ),
-                  );
-                },
-              );
-            },
+                    const SizedBox(height: AppSpacing.x2),
+                    Wrap(
+                      spacing: AppSpacing.x2,
+                      runSpacing: AppSpacing.x2,
+                      children: <Widget>[
+                        _CaptionBadge(label: offer.providerLabel),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              if (selected)
+                const Icon(
+                  Icons.check_circle_rounded,
+                  color: AppColors.purpleC100,
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -3002,6 +3539,7 @@ class _PlayerCaptionRow extends StatelessWidget {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppColors.modalBackground,
+      barrierColor: AppColors.transparent,
       showDragHandle: true,
       builder: (BuildContext sheetContext) {
         return SafeArea(
@@ -3351,68 +3889,72 @@ class _SubtitleCustomizeSheetState extends State<_SubtitleCustomizeSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(AppSpacing.x4),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              IconButton(
-                onPressed: widget.onBack,
-                icon: const Icon(Icons.arrow_back_rounded),
-              ),
-              Expanded(
-                child: Text(
-                  'Customize subtitles',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        color: AppColors.typeEmphasis,
-                      ),
+    final double maxH = MediaQuery.sizeOf(context).height * 0.88;
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: maxH),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(AppSpacing.x4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                IconButton(
+                  onPressed: widget.onBack,
+                  icon: const Icon(Icons.arrow_back_rounded),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.x3),
-          // Live preview block. Mirrors the on-screen subtitle render so
-          // the slider/color choices feel immediate.
-          DecoratedBox(
-            decoration: BoxDecoration(
-              color: AppColors.blackC50,
-              borderRadius: BorderRadius.circular(AppSpacing.x3),
-              border: Border.all(color: AppColors.dropdownBorder),
-            ),
-            child: SizedBox(
-              height: 96,
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: AppSpacing.x3,
-                    vertical: AppSpacing.x2,
+                Expanded(
+                  child: Text(
+                    'Customize subtitles',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          color: AppColors.typeEmphasis,
+                        ),
                   ),
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: _bgOpacity),
-                      borderRadius: BorderRadius.circular(AppSpacing.x2),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.x3),
+            // Live preview block. Mirrors the on-screen subtitle render so
+            // the slider/color choices feel immediate.
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppColors.blackC50,
+                borderRadius: BorderRadius.circular(AppSpacing.x3),
+                border: Border.all(color: AppColors.dropdownBorder),
+              ),
+              child: SizedBox(
+                height: 96,
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.x3,
+                      vertical: AppSpacing.x2,
                     ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: AppSpacing.x2,
-                        vertical: AppSpacing.x1,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: _bgOpacity),
+                        borderRadius: BorderRadius.circular(AppSpacing.x2),
                       ),
-                      child: Text(
-                        'Sample subtitle text',
-                        style: TextStyle(
-                          color: _hexToColor(_color),
-                          fontSize: _size.toDouble(),
-                          fontWeight: FontWeight.w600,
-                          shadows: const <Shadow>[
-                            Shadow(
-                              color: Colors.black,
-                              offset: Offset(0, 1),
-                              blurRadius: 2,
-                            ),
-                          ],
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.x2,
+                          vertical: AppSpacing.x1,
+                        ),
+                        child: Text(
+                          'Sample subtitle text',
+                          style: TextStyle(
+                            color: _hexToColor(_color),
+                            fontSize: _size.toDouble(),
+                            fontWeight: FontWeight.w600,
+                            shadows: const <Shadow>[
+                              Shadow(
+                                color: Colors.black,
+                                offset: Offset(0, 1),
+                                blurRadius: 2,
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -3420,8 +3962,7 @@ class _SubtitleCustomizeSheetState extends State<_SubtitleCustomizeSheet> {
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: AppSpacing.x4),
+            const SizedBox(height: AppSpacing.x4),
           Text('Font size', style: Theme.of(context).textTheme.titleMedium),
           Slider(
             min: 16,
@@ -3481,7 +4022,8 @@ class _SubtitleCustomizeSheetState extends State<_SubtitleCustomizeSheet> {
               widget.onChanged(bgOpacity: _bgOpacity);
             },
           ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -3530,194 +4072,6 @@ class _ColorSwatch extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Read-only transcript reader. Streams the chosen caption track over
-/// HTTP, runs a tolerant VTT/SRT parser, and renders cues with timestamps.
-class _TranscriptSheet extends StatefulWidget {
-  const _TranscriptSheet({
-    required this.caption,
-    required this.onBack,
-    this.headers = const <String, String>{},
-  });
-
-  final StreamCaption caption;
-  final Map<String, String> headers;
-  final VoidCallback onBack;
-
-  @override
-  State<_TranscriptSheet> createState() => _TranscriptSheetState();
-}
-
-class _TranscriptSheetState extends State<_TranscriptSheet> {
-  late Future<List<_TranscriptCue>> _future = _load();
-
-  Future<List<_TranscriptCue>> _load() async {
-    final String? url = widget.caption.url;
-    if (url == null || url.isEmpty) {
-      return const <_TranscriptCue>[];
-    }
-    final http.Response response = await http
-        .get(Uri.parse(url), headers: widget.headers)
-        .timeout(const Duration(seconds: 20));
-    if (response.statusCode != 200) {
-      throw Exception('Could not load transcript (${response.statusCode})');
-    }
-    return _parseCues(response.body);
-  }
-
-  static List<_TranscriptCue> _parseCues(String raw) {
-    final List<_TranscriptCue> out = <_TranscriptCue>[];
-    // Tolerant block split — VTT and SRT both separate cues with a blank
-    // line. Timestamps are matched with `-->` and trimmed of trailing
-    // styling info (`align:`, `position:` etc.).
-    final RegExp tsRe = RegExp(
-      r'(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})',
-    );
-    for (final String block in raw.split(RegExp(r'\r?\n\r?\n'))) {
-      final List<String> lines = block.split(RegExp(r'\r?\n'));
-      if (lines.isEmpty) {
-        continue;
-      }
-      String? start;
-      final List<String> textLines = <String>[];
-      for (final String line in lines) {
-        final RegExpMatch? m = tsRe.firstMatch(line);
-        if (m != null) {
-          start = m.group(1);
-          continue;
-        }
-        if (line.trim().isEmpty) {
-          continue;
-        }
-        if (start == null) {
-          // Skip cue numbers ("1", "2") and metadata ("WEBVTT").
-          if (line.trim().toUpperCase() == 'WEBVTT' ||
-              int.tryParse(line.trim()) != null) {
-            continue;
-          }
-          continue;
-        }
-        textLines.add(line);
-      }
-      if (start != null && textLines.isNotEmpty) {
-        out.add(
-          _TranscriptCue(
-            timestamp: start,
-            text: textLines.join('\n').replaceAll(RegExp(r'<[^>]+>'), ''),
-          ),
-        );
-      }
-    }
-    return out;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(AppSpacing.x4),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              IconButton(
-                onPressed: widget.onBack,
-                icon: const Icon(Icons.arrow_back_rounded),
-              ),
-              Expanded(
-                child: Text(
-                  'Transcript',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        color: AppColors.typeEmphasis,
-                      ),
-                ),
-              ),
-              IconButton(
-                onPressed: () {
-                  setState(() {
-                    _future = _load();
-                  });
-                },
-                icon: const Icon(Icons.refresh_rounded),
-              ),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.x2),
-          SizedBox(
-            height: MediaQuery.sizeOf(context).height * 0.5,
-            child: FutureBuilder<List<_TranscriptCue>>(
-              future: _future,
-              builder: (
-                BuildContext context,
-                AsyncSnapshot<List<_TranscriptCue>> snapshot,
-              ) {
-                if (snapshot.connectionState != ConnectionState.done) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (snapshot.hasError) {
-                  return Padding(
-                    padding: const EdgeInsets.all(AppSpacing.x4),
-                    child: Text(
-                      '${snapshot.error}',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  );
-                }
-                final List<_TranscriptCue> cues =
-                    snapshot.data ?? const <_TranscriptCue>[];
-                if (cues.isEmpty) {
-                  return Padding(
-                    padding: const EdgeInsets.all(AppSpacing.x4),
-                    child: Text(
-                      'Transcript is empty for the selected track.',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  );
-                }
-                return ListView.separated(
-                  itemCount: cues.length,
-                  separatorBuilder: (_, _) =>
-                      const SizedBox(height: AppSpacing.x2),
-                  itemBuilder: (BuildContext context, int index) {
-                    final _TranscriptCue cue = cues[index];
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: AppSpacing.x2,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(
-                            cue.timestamp,
-                            style: Theme.of(context).textTheme.labelSmall
-                                ?.copyWith(color: AppColors.typeLink),
-                          ),
-                          const SizedBox(height: AppSpacing.x1),
-                          Text(
-                            cue.text,
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TranscriptCue {
-  const _TranscriptCue({required this.timestamp, required this.text});
-
-  final String timestamp;
-  final String text;
 }
 
 /// Small floating pill shown when the player is locked. The only affordance

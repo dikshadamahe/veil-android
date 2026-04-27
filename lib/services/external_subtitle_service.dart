@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:pstream_android/config/app_config.dart';
@@ -18,19 +20,46 @@ class ExternalSubtitleService {
   static DateTime? _osBearerUntil;
 
   /// Combined online offers (Wyzie first, then OpenSubtitles).
+  /// Failures are silent; use [searchOnlineDetailed] for error text in the UI.
   Future<List<ExternalSubtitleOffer>> searchOnline({
     required MediaItem media,
     int? season,
     int? episode,
   }) async {
+    final OnlineSubtitleSearchResult r = await searchOnlineDetailed(
+      media: media,
+      season: season,
+      episode: episode,
+    );
+    return r.offers;
+  }
+
+  /// Wyzie + OpenSubtitles with per-provider errors and skip reasons (e.g. TV
+  /// without episode). This is what the player uses so "empty" is explainable.
+  Future<OnlineSubtitleSearchResult> searchOnlineDetailed({
+    required MediaItem media,
+    int? season,
+    int? episode,
+  }) async {
     final List<ExternalSubtitleOffer> out = <ExternalSubtitleOffer>[];
+    final List<String> errors = <String>[];
+
+    if (media.isShow && (season == null || episode == null)) {
+      return OnlineSubtitleSearchResult(
+        offers: out,
+        skipReasons: <String>[
+          'For TV series, open a specific episode first. '
+              'Online libraries need a season and episode number.',
+        ],
+      );
+    }
 
     if (AppConfig.hasWyzieApiKey) {
       if (!media.isShow || (season != null && episode != null)) {
         try {
           out.addAll(await _searchWyzie(media, season, episode));
-        } catch (_) {
-          // Wyzie optional; continue with OpenSubtitles.
+        } catch (e) {
+          errors.add('Wyzie: $e');
         }
       }
     }
@@ -39,13 +68,16 @@ class ExternalSubtitleService {
       if (!media.isShow || (season != null && episode != null)) {
         try {
           out.addAll(await _searchOpensubtitles(media, season, episode));
-        } catch (_) {
-          // Ignore; UI can still show Wyzie results.
+        } catch (e) {
+          errors.add('OpenSubtitles: $e');
         }
       }
     }
 
-    return out;
+    return OnlineSubtitleSearchResult(
+      offers: out,
+      providerErrors: errors,
+    );
   }
 
   /// Resolve OpenSubtitles [fileId] to a single-use HTTPS link (SRT).
@@ -153,6 +185,53 @@ class ExternalSubtitleService {
     return headers;
   }
 
+  static const int _idempotentGetMaxAttempts = 3;
+  static const Duration _idempotentGetTimeout = Duration(seconds: 25);
+
+  static bool _isRetryableIdempotentGetError(Object e) {
+    if (e is SocketException) {
+      return true;
+    }
+    if (e is TimeoutException) {
+      return true;
+    }
+    if (e is http.ClientException) {
+      return true;
+    }
+    final String m = e.toString().toLowerCase();
+    return m.contains('connection reset') ||
+        m.contains('connection closed') ||
+        m.contains('broken pipe') ||
+        m.contains('network is unreachable') ||
+        m.contains('host lookup') ||
+        m.contains('handshake');
+  }
+
+  /// [OpenSubtitles] / Wyzie occasionally drop the TLS socket on mobile; a few
+  /// short retries usually succeeds without changing the API contract.
+  Future<http.Response> _getIdempotentWithRetry(
+    Uri uri, {
+    required Map<String, String> headers,
+  }) async {
+    for (int attempt = 0; attempt < _idempotentGetMaxAttempts; attempt++) {
+      try {
+        return await http
+            .get(uri, headers: headers)
+            .timeout(_idempotentGetTimeout);
+      } catch (e) {
+        if (attempt < _idempotentGetMaxAttempts - 1 &&
+            _isRetryableIdempotentGetError(e)) {
+          await Future<void>.delayed(
+            Duration(milliseconds: 300 * (attempt + 1)),
+          );
+        } else {
+          rethrow;
+        }
+      }
+    }
+    throw StateError('ID GET retry: unreachable');
+  }
+
   Future<List<ExternalSubtitleOffer>> _searchWyzie(
     MediaItem media,
     int? season,
@@ -168,17 +247,21 @@ class ExternalSubtitleService {
       },
     );
 
-    final http.Response response = await http
-        .get(uri, headers: <String, String>{'Accept': 'application/json'})
-        .timeout(const Duration(seconds: 25));
+    final http.Response response = await _getIdempotentWithRetry(
+      uri,
+      headers: <String, String>{
+        'Accept': 'application/json',
+        'User-Agent': AppConfig.subtitleHttpUserAgent,
+      },
+    );
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      return const <ExternalSubtitleOffer>[];
+      throw _httpFailureMessage(response);
     }
 
     final dynamic decoded = jsonDecode(response.body);
     if (decoded is! List) {
-      return const <ExternalSubtitleOffer>[];
+      throw Exception('unexpected response (not a JSON list)');
     }
 
     final List<ExternalSubtitleOffer> offers = <ExternalSubtitleOffer>[];
@@ -223,37 +306,58 @@ class ExternalSubtitleService {
     int? season,
     int? episode,
   ) async {
-    final Map<String, String> query = <String, String>{};
-
+    final Map<String, String> byIds = <String, String>{};
     final String? imdb = _imdbForOpensubtitles(media.imdbId);
     if (media.isMovie) {
-      query['tmdb_id'] = '${media.tmdbId}';
+      byIds['tmdb_id'] = '${media.tmdbId}';
       if (imdb != null) {
-        query['imdb_id'] = imdb;
+        byIds['imdb_id'] = imdb;
       }
     } else {
-      query['parent_tmdb_id'] = '${media.tmdbId}';
+      byIds['parent_tmdb_id'] = '${media.tmdbId}';
       if (season != null) {
-        query['season_number'] = '$season';
+        byIds['season_number'] = '$season';
       }
       if (episode != null) {
-        query['episode_number'] = '$episode';
+        byIds['episode_number'] = '$episode';
       }
       if (imdb != null) {
-        query['parent_imdb_id'] = imdb;
+        byIds['parent_imdb_id'] = imdb;
       }
     }
 
-    final Uri uri = _osBase
-        .resolve('subtitles')
-        .replace(queryParameters: query);
+    final List<ExternalSubtitleOffer> fromIds = await _fetchOpensubtitleOffers(
+      byIds,
+    );
+    if (fromIds.isNotEmpty || !media.isMovie) {
+      return fromIds;
+    }
+    // Title query fallback: TMDb-based search can return 0 files if ids are
+    // out of sync or the catalog is sparse (users reported this for some
+    // release titles, e.g. "Search online" finding files by name).
+    final String title = media.title.trim();
+    if (title.isEmpty) {
+      return fromIds;
+    }
+    final String textQuery = media.year > 0 ? '$title ${media.year}' : title;
+    return _fetchOpensubtitleOffers(
+      <String, String>{'query': textQuery},
+    );
+  }
 
-    final http.Response response = await http
-        .get(uri, headers: _opensubtitlesHeaders(includeBearer: false))
-        .timeout(const Duration(seconds: 25));
+  /// Parses a single [GET /api/v1/subtitles] response into offers.
+  Future<List<ExternalSubtitleOffer>> _fetchOpensubtitleOffers(
+    Map<String, String> query,
+  ) async {
+    final Uri uri = _osBase.resolve('subtitles').replace(queryParameters: query);
+
+    final http.Response response = await _getIdempotentWithRetry(
+      uri,
+      headers: _opensubtitlesHeaders(includeBearer: false),
+    );
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      return const <ExternalSubtitleOffer>[];
+      throw _httpFailureMessage(response);
     }
 
     final Map<String, dynamic> json = Map<String, dynamic>.from(
@@ -317,6 +421,18 @@ class ExternalSubtitleService {
       return null;
     }
     return t.startsWith('tt') ? t : 'tt$t';
+  }
+
+  static String _httpFailureMessage(http.Response r) {
+    final String body = r.body;
+    String detail = body.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (detail.length > 200) {
+      detail = '${detail.substring(0, 200)}…';
+    }
+    if (detail.isEmpty) {
+      return 'HTTP ${r.statusCode} ${r.request?.url}';
+    }
+    return 'HTTP ${r.statusCode} — $detail';
   }
 
   static String? _parseNullableString(dynamic value) {

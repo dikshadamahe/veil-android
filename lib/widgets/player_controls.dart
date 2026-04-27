@@ -9,7 +9,6 @@ class PlayerControls extends StatelessWidget {
     super.key,
     required this.visible,
     required this.mediaTitle,
-    required this.sourceLabel,
     required this.isPlaying,
     required this.position,
     required this.duration,
@@ -32,7 +31,6 @@ class PlayerControls extends StatelessWidget {
 
   final bool visible;
   final String mediaTitle;
-  final String sourceLabel;
   final bool isPlaying;
   final Duration position;
   final Duration duration;
@@ -84,16 +82,9 @@ class PlayerControls extends StatelessWidget {
                           children: <Widget>[
                             Text(
                               mediaTitle,
-                              maxLines: 1,
+                              maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.titleLarge,
-                            ),
-                            const SizedBox(height: AppSpacing.x1),
-                            Text(
-                              sourceLabel,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.labelMedium,
                             ),
                           ],
                         ),

@@ -22,3 +22,20 @@ class ExternalSubtitleOffer {
 
   bool get needsOpensubtitlesDownload => opensubtitlesFileId != null;
 }
+
+/// Result of querying Wyzie and OpenSubtitles in one pass.
+class OnlineSubtitleSearchResult {
+  const OnlineSubtitleSearchResult({
+    required this.offers,
+    this.skipReasons = const <String>[],
+    this.providerErrors = const <String>[],
+  });
+
+  final List<ExternalSubtitleOffer> offers;
+
+  /// Preconditions that prevented any online request (e.g. TV with no episode).
+  final List<String> skipReasons;
+
+  /// Non-fatal failures (HTTP/network) for one or both providers.
+  final List<String> providerErrors;
+}
