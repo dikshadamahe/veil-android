@@ -133,6 +133,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _playerReady = false;
   bool _hasPlaybackError = false;
   bool _sourceSwitching = false;
+  /// Per-source probe (Sources sheet). Lives on the player, not the sheet, so
+  /// “Check which sources …” can finish after the user closes the bottom sheet.
+  final Map<String, _SourceStreamStatus> _sourceProbeStatus =
+      <String, _SourceStreamStatus>{};
+  bool _sourceProbeScanRunning = false;
+  /// Bumps the Sources sheet to rebuild (modal route is not a child of this
+  /// [setState], so ticks update live via [Listenable]).
+  final ValueNotifier<int> _sourceProbeUi = ValueNotifier<int>(0);
   /// When set, the matching [ExternalSubtitleOffer.id] is the active online track.
   String? _activeExternalOfferId;
   /// Short label for settings card when an online track is active.
@@ -199,6 +207,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _progressTimer?.cancel();
     _subtitleToastTimer?.cancel();
     _gestureHintTimer?.cancel();
+    _sourceProbeUi.dispose();
     _playerSettingsLabelRev.dispose();
     unawaited(_restoreScreenBrightness());
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
@@ -1027,6 +1036,60 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
+  /// Per-source stream checks for the Sources sheet. State lives on
+  /// [PlayerScreen] so the scrape loop continues after the bottom sheet is
+  /// popped; we only stop if the user leaves the player ([mounted] is false).
+  /// Progress uses [_sourceProbeUi] so the open sheet still repaints: modal
+  /// routes are not children of this [setState], so a notifier is required
+  /// for live ticks while the probe runs in the background.
+  Future<void> _runSourceProbeForCatalog(
+    List<ScrapeSourceDefinition> sources,
+  ) async {
+    if (_sourceProbeScanRunning) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    _sourceProbeScanRunning = true;
+    _sourceProbeUi.value++;
+    for (final ScrapeSourceDefinition s in sources) {
+      if (!mounted) {
+        break;
+      }
+      _sourceProbeStatus[s.id] = _SourceStreamStatus.loading;
+      _sourceProbeUi.value++;
+      try {
+        final StreamResult? r = await _streamService.scrapeSingleSource(
+          widget.args.mediaItem,
+          sourceId: s.id,
+          season: widget.args.season,
+          episode: widget.args.episode,
+          seasonTmdbId: widget.args.seasonTmdbId,
+          episodeTmdbId: widget.args.episodeTmdbId,
+          seasonTitle: widget.args.seasonTitle,
+        );
+        if (!mounted) {
+          break;
+        }
+        _sourceProbeStatus[s.id] = (r != null && _streamResultHasPlayableUrl(r))
+            ? _SourceStreamStatus.playable
+            : _SourceStreamStatus.none;
+        _sourceProbeUi.value++;
+      } catch (_) {
+        if (!mounted) {
+          break;
+        }
+        _sourceProbeStatus[s.id] = _SourceStreamStatus.none;
+        _sourceProbeUi.value++;
+      }
+    }
+    _sourceProbeScanRunning = false;
+    if (mounted) {
+      _sourceProbeUi.value++;
+    }
+  }
+
   Future<void> _openSourceSheet() async {
     _showControls();
     final String? selectedSourceId = await _showPlayerSheet<String>(
@@ -1073,24 +1136,25 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                         ),
                       );
                     },
-                    child: _SourcesCatalogSheet(
-                      sources: sources,
-                      currentSourceId: widget.args.streamResult.sourceId,
-                      probeSource: (String sourceId) {
-                        return _streamService.scrapeSingleSource(
-                          widget.args.mediaItem,
-                          sourceId: sourceId,
-                          season: widget.args.season,
-                          episode: widget.args.episode,
-                          seasonTmdbId: widget.args.seasonTmdbId,
-                          episodeTmdbId: widget.args.episodeTmdbId,
-                          seasonTitle: widget.args.seasonTitle,
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: _sourceProbeUi,
+                      builder: (
+                        BuildContext context,
+                        int _,
+                        Widget? child,
+                      ) {
+                        return _SourcesCatalogSheet(
+                          sources: sources,
+                          currentSourceId: widget.args.streamResult.sourceId,
+                          sourceProbeStatus: _sourceProbeStatus,
+                          sourceProbeScanRunning: _sourceProbeScanRunning,
+                          onCheckSources: () {
+                            unawaited(_runSourceProbeForCatalog(sources));
+                          },
+                          onPick: (String sourceId) {
+                            Navigator.of(context).pop(sourceId);
+                          },
                         );
-                      },
-                      isPlayable: (StreamResult? r) =>
-                          r != null && _streamResultHasPlayableUrl(r),
-                      onPick: (String sourceId) {
-                        Navigator.of(context).pop(sourceId);
                       },
                     ),
                   );
@@ -2911,72 +2975,27 @@ class _NextEpisodeTarget {
 }
 
 /// Source list with optional per-source scrape probe (tick / cross only — no auto-switch).
-class _SourcesCatalogSheet extends StatefulWidget {
+/// Probe state is held on [PlayerScreen] so checks continue if this sheet is closed.
+class _SourcesCatalogSheet extends StatelessWidget {
   const _SourcesCatalogSheet({
     required this.sources,
     required this.currentSourceId,
-    required this.probeSource,
-    required this.isPlayable,
+    required this.sourceProbeStatus,
+    required this.sourceProbeScanRunning,
+    required this.onCheckSources,
     required this.onPick,
   });
 
   final List<ScrapeSourceDefinition> sources;
   final String currentSourceId;
-  final Future<StreamResult?> Function(String sourceId) probeSource;
-  final bool Function(StreamResult? result) isPlayable;
+  final Map<String, _SourceStreamStatus> sourceProbeStatus;
+  final bool sourceProbeScanRunning;
+  final VoidCallback onCheckSources;
   final void Function(String sourceId) onPick;
-
-  @override
-  State<_SourcesCatalogSheet> createState() => _SourcesCatalogSheetState();
-}
-
-class _SourcesCatalogSheetState extends State<_SourcesCatalogSheet> {
-  final Map<String, _SourceStreamStatus> _status = <String, _SourceStreamStatus>{};
-  bool _scanRunning = false;
-
-  Future<void> _runProbe() async {
-    if (_scanRunning) {
-      return;
-    }
-    setState(() {
-      _scanRunning = true;
-    });
-    for (final ScrapeSourceDefinition s in widget.sources) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _status[s.id] = _SourceStreamStatus.loading;
-      });
-      try {
-        final StreamResult? r = await widget.probeSource(s.id);
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _status[s.id] = widget.isPlayable(r)
-              ? _SourceStreamStatus.playable
-              : _SourceStreamStatus.none;
-        });
-      } catch (_) {
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _status[s.id] = _SourceStreamStatus.none;
-        });
-      }
-    }
-    if (mounted) {
-      setState(() {
-        _scanRunning = false;
-      });
-    }
-  }
 
   Widget _trailing(String sourceId) {
     final _SourceStreamStatus st =
-        _status[sourceId] ?? _SourceStreamStatus.unknown;
+        sourceProbeStatus[sourceId] ?? _SourceStreamStatus.unknown;
     switch (st) {
       case _SourceStreamStatus.unknown:
         return const SizedBox(width: AppSpacing.x8);
@@ -3011,14 +3030,14 @@ class _SourcesCatalogSheetState extends State<_SourcesCatalogSheet> {
           child: ListView.builder(
             primary: false,
             shrinkWrap: true,
-            itemCount: widget.sources.length,
+            itemCount: sources.length,
             itemBuilder: (BuildContext context, int index) {
-              final ScrapeSourceDefinition source = widget.sources[index];
-              final bool isCurrent = source.id == widget.currentSourceId;
+              final ScrapeSourceDefinition source = sources[index];
+              final bool isCurrent = source.id == currentSourceId;
               return Material(
                 color: Colors.transparent,
                 child: InkWell(
-                  onTap: () => widget.onPick(source.id),
+                  onTap: () => onPick(source.id),
                   borderRadius: BorderRadius.circular(AppSpacing.x4),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
@@ -3073,16 +3092,19 @@ class _SourcesCatalogSheetState extends State<_SourcesCatalogSheet> {
         const Divider(color: AppColors.utilsDivider, height: AppSpacing.x4),
         Text(
           'Checks each source for this title/episode. '
-          'Tick = a playable stream was returned. Cross = none. Does not change the active source.',
+          'Tick = a playable stream was returned. Cross = none. Does not change the active source. '
+          'The check continues in the background if you close this panel.',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: AppColors.typeSecondary,
               ),
         ),
         const SizedBox(height: AppSpacing.x2),
         TextButton(
-          onPressed: _scanRunning ? null : _runProbe,
+          onPressed: sourceProbeScanRunning ? null : onCheckSources,
           child: Text(
-            _scanRunning ? 'Checking…' : 'Check which sources have streams',
+            sourceProbeScanRunning
+                ? 'Checking…'
+                : 'Check which sources have streams',
           ),
         ),
       ],
