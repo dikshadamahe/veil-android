@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:pstream_android/models/media_item.dart';
+import 'package:pstream_android/models/stream_result.dart';
 import 'package:pstream_android/screens/detail_screen.dart';
 import 'package:pstream_android/screens/history_screen.dart';
 import 'package:pstream_android/screens/home_screen.dart';
@@ -142,8 +143,28 @@ final GoRouter appRouter = GoRouter(
       path: '/player',
       builder: (BuildContext context, GoRouterState state) {
         final PlayerScreenArgs args = state.extra! as PlayerScreenArgs;
-        return PlayerScreen(args: args);
+        // New key when the active stream / source changes so [PlayerScreen]
+        // state remounts and [initState] runs [PlayerScreen._openStream] again.
+        // Navigating to the same path with new [extra] alone would update the
+        // widget without a key and leave the old video playing.
+        return PlayerScreen(
+          key: ValueKey<String>(_playerStreamIdentity(args.streamResult)),
+          args: args,
+        );
       },
     ),
   ],
 );
+
+/// Stable identity for the active [StreamResult] so [GoRoute] `/player` can
+/// remount [PlayerScreen] when the user switches sources (new [extra]).
+String _playerStreamIdentity(StreamResult r) {
+  final String url = (r.stream.playbackUrl?.trim().isNotEmpty == true)
+      ? r.stream.playbackUrl!.trim()
+      : ((r.stream.proxiedPlaylist?.trim().isNotEmpty == true)
+          ? r.stream.proxiedPlaylist!.trim()
+          : ((r.stream.playlist?.trim().isNotEmpty == true)
+              ? r.stream.playlist!.trim()
+              : (r.stream.id?.trim() ?? '')));
+  return '${r.sourceId}|${r.sourceName}|$url';
+}

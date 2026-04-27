@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -2538,8 +2539,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                         controller: _videoController,
                         configuration: _buildSubtitleViewConfiguration(
                           ref,
-                          liftAboveControlChrome:
-                              _controlsVisible && !_controlsLocked,
+                          displayVisible:
+                              !(_controlsVisible && !_controlsLocked),
+                          liftAboveControlChrome: false,
                         ),
                       ),
                     ),
@@ -2669,24 +2671,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (!mounted) {
       return;
     }
-    // Do not await: [pushReplacement]'s future completes when the *new* route
-    // is popped, which would stall this screen until the user exits the player.
-    unawaited(
-      Navigator.of(context, rootNavigator: true).pushReplacement(
-        MaterialPageRoute<void>(
-          builder: (_) => PlayerScreen(
-            args: PlayerScreenArgs(
-              mediaItem: widget.args.mediaItem,
-              streamResult: result,
-              season: widget.args.season,
-              episode: widget.args.episode,
-              seasonTmdbId: widget.args.seasonTmdbId,
-              episodeTmdbId: widget.args.episodeTmdbId,
-              seasonTitle: widget.args.seasonTitle,
-              resumeFrom: _position.inSeconds,
-            ),
-          ),
-        ),
+    // Keep GoRouter’s `/player` [extra] in sync so settings and back stack see
+    // the new [StreamResult]. [Navigator.pushReplacement] left the route
+    // state stale while a second [PlayerScreen] played on top.
+    context.go(
+      '/player',
+      extra: PlayerScreenArgs(
+        mediaItem: widget.args.mediaItem,
+        streamResult: result,
+        season: widget.args.season,
+        episode: widget.args.episode,
+        seasonTmdbId: widget.args.seasonTmdbId,
+        episodeTmdbId: widget.args.episodeTmdbId,
+        seasonTitle: widget.args.seasonTitle,
+        resumeFrom: _position.inSeconds,
       ),
     );
   }
