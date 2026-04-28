@@ -128,6 +128,120 @@ function parseSourceOrder(queryValue) {
   return parts.length > 0 ? parts : undefined;
 }
 
+function sortEmbedsForSelection(embeds, targetEmbedId) {
+  return [...embeds].sort((a, b) => {
+    const aScore = a.embedId === targetEmbedId ? 0 : 1;
+    const bScore = b.embedId === targetEmbedId ? 0 : 1;
+    return aScore - bScore;
+  });
+}
+
+async function runEmbedFromSource({ media, sourceId, embedId }) {
+  const sourceMeta = providers.getMetadata(sourceId);
+  const embedMeta = providers.getMetadata(embedId);
+
+  const sourceOutput = await providers.runSourceScraper({
+    media,
+    id: sourceId,
+  });
+
+  const matchingEmbeds = sortEmbedsForSelection(
+    (sourceOutput.embeds || []).filter((entry) => entry.embedId === embedId),
+    embedId,
+  );
+
+  for (const match of matchingEmbeds) {
+    try {
+      const embedOutput = await providers.runEmbedScraper({
+        url: match.url,
+        id: embedId,
+      });
+
+      if (embedOutput?.stream?.[0]) {
+        return normalizeRunOutput(
+          {
+            sourceId,
+            embedId,
+            stream: embedOutput.stream[0],
+          },
+          sourceMeta,
+          embedMeta,
+        );
+      }
+    } catch (_) {
+      // Try the next matching URL if a source exposes the same embed type more than once.
+    }
+  }
+
+  return null;
+}
+
+async function runExplicitSelection(query, media) {
+  const selectedId = parseNonEmptyString(query.selectedId);
+  const selectedType = parseNonEmptyString(query.selectedType);
+
+  if (!selectedId || !selectedType) {
+    return null;
+  }
+
+  if (selectedType === "source") {
+    const sourceMeta = providers.getMetadata(selectedId);
+    const output = await providers.runSourceScraper({
+      media,
+      id: selectedId,
+    });
+
+    if (output?.stream?.[0]) {
+      return normalizeRunOutput(
+        {
+          sourceId: selectedId,
+          stream: output.stream[0],
+        },
+        sourceMeta,
+        null,
+      );
+    }
+
+    const sourceEmbeds = output?.embeds || [];
+    if (sourceEmbeds.length === 0) {
+      return null;
+    }
+
+    const embedOrder = parseSourceOrder(query.embedOrder);
+    const preferredEmbedIds =
+      embedOrder && embedOrder.length > 0
+        ? embedOrder
+        : [...new Set(sourceEmbeds.map((entry) => entry.embedId))];
+
+    for (const embedId of preferredEmbedIds) {
+      const result = await runEmbedFromSource({
+        media,
+        sourceId: selectedId,
+        embedId,
+      });
+      if (result) {
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+  if (selectedType === "embed") {
+    const parentSourceId = parseNonEmptyString(query.parentSourceId);
+    if (!parentSourceId) {
+      return null;
+    }
+    return runEmbedFromSource({
+      media,
+      sourceId: parentSourceId,
+      embedId: selectedId,
+    });
+  }
+
+  return null;
+}
+
 function withTimeout(promise, timeoutMs) {
   return Promise.race([
     promise,
@@ -143,6 +257,11 @@ async function runScrape(query) {
     const error = new Error(parsed.error);
     error.statusCode = 400;
     throw error;
+  }
+
+  const explicitSelection = await runExplicitSelection(query, parsed.media);
+  if (explicitSelection) {
+    return explicitSelection;
   }
 
   const sourceOrder = parseSourceOrder(query.sourceOrder);

@@ -223,7 +223,9 @@ class StreamService {
 
   Future<StreamResult?> scrapeSingleSource(
     MediaItem mediaItem, {
-    required String sourceId,
+    required String selectedId,
+    required String selectedType,
+    String? parentSourceId,
     int? season,
     int? episode,
     String? seasonTmdbId,
@@ -237,8 +239,9 @@ class StreamService {
       seasonTmdbId: seasonTmdbId,
       episodeTmdbId: episodeTmdbId,
       seasonTitle: seasonTitle,
-      sourceOrder: <String>[sourceId],
-      embedOrder: <String>[sourceId],
+      selectedId: selectedId,
+      selectedType: selectedType,
+      parentSourceId: parentSourceId,
     );
   }
 
@@ -387,6 +390,9 @@ class StreamService {
     String? seasonTitle,
     List<String>? sourceOrder,
     List<String>? embedOrder,
+    String? selectedId,
+    String? selectedType,
+    String? parentSourceId,
   }) async {
     final http.Client client = http.Client();
     final Uri scrapeUri = _buildUri(
@@ -399,6 +405,9 @@ class StreamService {
       seasonTitle: seasonTitle,
       sourceOrder: sourceOrder,
       embedOrder: embedOrder,
+      selectedId: selectedId,
+      selectedType: selectedType,
+      parentSourceId: parentSourceId,
     );
     try {
       final http.Response response = await client
@@ -441,6 +450,9 @@ class StreamService {
     String? seasonTitle,
     List<String>? sourceOrder,
     List<String>? embedOrder,
+    String? selectedId,
+    String? selectedType,
+    String? parentSourceId,
   }) {
     final Uri base = _baseUri(path);
     final List<String>? effectiveOrder =
@@ -451,6 +463,9 @@ class StreamService {
         episode: episode,
         sourceOrder: effectiveOrder,
         embedOrder: embedOrder,
+        selectedId: selectedId,
+        selectedType: selectedType,
+        parentSourceId: parentSourceId,
         seasonTmdbId: seasonTmdbId,
         episodeTmdbId: episodeTmdbId,
         seasonTitle: seasonTitle,

@@ -1163,7 +1163,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       try {
         final StreamResult? r = await _streamService.scrapeSingleSource(
           widget.args.mediaItem,
-          sourceId: s.id,
+          selectedId: s.id,
+          selectedType: s.type,
+          parentSourceId: widget.args.streamResult.sourceId,
           season: widget.args.season,
           episode: widget.args.episode,
           seasonTmdbId: widget.args.seasonTmdbId,
@@ -1934,7 +1936,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       await _persistProgress();
       final StreamResult? result = await _streamService.scrapeSingleSource(
         widget.args.mediaItem,
-        sourceId: source.id,
+        selectedId: source.id,
+        selectedType: source.type,
+        parentSourceId: widget.args.streamResult.sourceId,
         season: widget.args.season,
         episode: widget.args.episode,
         seasonTmdbId: widget.args.seasonTmdbId,

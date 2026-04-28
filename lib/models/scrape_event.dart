@@ -185,11 +185,13 @@ class ScrapeSourceDefinition {
   const ScrapeSourceDefinition({
     required this.id,
     required this.name,
+    required this.type,
     this.embedScraperId,
   });
 
   final String id;
   final String name;
+  final String type;
   final String? embedScraperId;
 
   factory ScrapeSourceDefinition.fromJson(dynamic json) {
@@ -205,6 +207,7 @@ class ScrapeSourceDefinition {
       name:
           '${map['name'] ?? map['embedScraperId'] ?? map['id'] ?? map['scraperId'] ?? ''}'
               .trim(),
+      type: '${map['type'] ?? 'source'}'.trim(),
       embedScraperId: _parseNullableString(map['embedScraperId']),
     );
   }
@@ -213,6 +216,7 @@ class ScrapeSourceDefinition {
     return <String, dynamic>{
       'id': id,
       'name': name,
+      'type': type,
       if (embedScraperId != null) 'embedScraperId': embedScraperId,
     };
   }

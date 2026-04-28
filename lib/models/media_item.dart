@@ -96,6 +96,9 @@ class MediaItem {
     int? episode,
     List<String>? sourceOrder,
     List<String>? embedOrder,
+    String? selectedId,
+    String? selectedType,
+    String? parentSourceId,
     String? seasonTmdbId,
     String? episodeTmdbId,
     String? seasonTitle,
@@ -119,6 +122,12 @@ class MediaItem {
         'sourceOrder': sourceOrder.join(','),
       if (embedOrder != null && embedOrder.isNotEmpty)
         'embedOrder': embedOrder.join(','),
+      if (selectedId != null && selectedId.trim().isNotEmpty)
+        'selectedId': selectedId.trim(),
+      if (selectedType != null && selectedType.trim().isNotEmpty)
+        'selectedType': selectedType.trim(),
+      if (parentSourceId != null && parentSourceId.trim().isNotEmpty)
+        'parentSourceId': parentSourceId.trim(),
     };
   }
 
