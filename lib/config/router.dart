@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:pstream_android/models/media_item.dart';
-import 'package:pstream_android/models/stream_result.dart';
 import 'package:pstream_android/screens/detail_screen.dart';
 import 'package:pstream_android/screens/history_screen.dart';
 import 'package:pstream_android/screens/home_screen.dart';
@@ -143,12 +142,14 @@ final GoRouter appRouter = GoRouter(
       path: '/player',
       builder: (BuildContext context, GoRouterState state) {
         final PlayerScreenArgs args = state.extra! as PlayerScreenArgs;
-        // New key when the active stream / source changes so [PlayerScreen]
-        // state remounts and [initState] runs [PlayerScreen._openStream] again.
-        // Navigating to the same path with new [extra] alone would update the
-        // widget without a key and leave the old video playing.
+        // One [PlayerScreen] *session* per playing unit (movie, or one TV episode).
+        // Source switches use the [same] key: [State] is kept, new [PlayerScreenArgs]
+        // are delivered from GoRouter, and [PlayerScreen] reloads the stream in
+        // [didUpdateWidget] when [streamResult] / [replaceEpoch] change. Keys that
+        // included the stream URL or forced remount could drop state and skip
+        // the second [_openStream].
         return PlayerScreen(
-          key: ValueKey<String>(_playerRouteKey(args)),
+          key: ValueKey<String>(_playerScreenSessionId(args)),
           args: args,
         );
       },
@@ -156,24 +157,10 @@ final GoRouter appRouter = GoRouter(
   ],
 );
 
-/// Route key: [StreamResult] identity plus [PlayerScreenArgs.replaceEpoch] so a
-/// new scrape always remounts [PlayerScreen] even when the provider reuses the
-/// same [StreamResult.sourceId] or playback URL for different [sourceOrder] rows.
-String _playerRouteKey(PlayerScreenArgs args) {
-  final int epoch = args.replaceEpoch ?? 0;
-  return '${args.mediaItem.tmdbId}|$epoch|${_playerStreamIdentity(args.streamResult)}';
-}
-
-/// Stable stream identity (includes embed and URL) for [PlayerScreen] remounts.
-String _playerStreamIdentity(StreamResult r) {
-  final String url = (r.stream.playbackUrl?.trim().isNotEmpty == true)
-      ? r.stream.playbackUrl!.trim()
-      : ((r.stream.proxiedPlaylist?.trim().isNotEmpty == true)
-          ? r.stream.proxiedPlaylist!.trim()
-          : ((r.stream.playlist?.trim().isNotEmpty == true)
-              ? r.stream.playlist!.trim()
-              : (r.stream.id?.trim() ?? '')));
-  final String embed =
-      (r.embedId != null && r.embedId!.trim().isNotEmpty) ? r.embedId!.trim() : '';
-  return '${r.sourceId}|$embed|${r.sourceName}|$url';
+String _playerScreenSessionId(PlayerScreenArgs args) {
+  final MediaItem m = args.mediaItem;
+  if (m.isShow && args.season != null && args.episode != null) {
+    return '${m.hiveKey()}-s${args.season}-e${args.episode}';
+  }
+  return m.hiveKey();
 }

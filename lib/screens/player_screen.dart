@@ -213,6 +213,74 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   @override
+  void didUpdateWidget(covariant PlayerScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_playbackArgsDiffer(oldWidget.args, widget.args)) {
+      return;
+    }
+    unawaited(_reloadStreamForUpdatedPlaybackArgs());
+  }
+
+  bool _playbackArgsDiffer(PlayerScreenArgs a, PlayerScreenArgs b) {
+    if (a.replaceEpoch != b.replaceEpoch) {
+      return true;
+    }
+    return _streamPlaybackIdentity(a.streamResult) !=
+        _streamPlaybackIdentity(b.streamResult);
+  }
+
+  /// Distinguishes scrape responses for [didUpdateWidget] (not full equality).
+  static String _streamPlaybackIdentity(StreamResult r) {
+    final String url = (r.stream.playbackUrl?.trim().isNotEmpty == true)
+        ? r.stream.playbackUrl!.trim()
+        : ((r.stream.proxiedPlaylist?.trim().isNotEmpty == true)
+            ? r.stream.proxiedPlaylist!.trim()
+            : ((r.stream.playlist?.trim().isNotEmpty == true)
+                ? r.stream.playlist!.trim()
+                : (r.stream.id?.trim() ?? '')));
+    final String embed = (r.embedId != null && r.embedId!.trim().isNotEmpty)
+        ? r.embedId!.trim()
+        : '';
+    return '${r.sourceId}|$embed|${r.sourceName}|$url';
+  }
+
+  Future<void> _reloadStreamForUpdatedPlaybackArgs() async {
+    if (!mounted) {
+      return;
+    }
+    _playerSettingsLabelRev.value++;
+    final int resume = _position.inSeconds;
+    await _persistProgress();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _sourceSwitching = false;
+      _playerReady = false;
+      _hasPlaybackError = false;
+      _playbackError = null;
+      _buffering = true;
+      _activeExternalOfferId = null;
+      _activeExternalSummary = null;
+    });
+    _resumeFromOverride = resume > 0 ? resume : null;
+    _resumeApplied = false;
+    _selectedCaption = null;
+    if (LocalStorage.getQualityCap() == LocalStorage.qualityCapAuto) {
+      _selectedQualityKey = null;
+      _selectedQualityUrl = null;
+    }
+    _applyUserPlaybackPrefs();
+    if (!mounted) {
+      return;
+    }
+    await _openStream(resumeFrom: resume > 0 ? resume : null);
+    if (mounted) {
+      _playerSettingsLabelRev.value++;
+    }
+  }
+
+  @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     // Capture before subscriptions/player tear-down so async persist does not
@@ -2697,11 +2765,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (!mounted) {
       return;
     }
-    // Keep GoRouter’s `/player` [extra] in sync so settings and back stack see
-    // the new [StreamResult]. [Navigator.pushReplacement] left the route
-    // state stale while a second [PlayerScreen] played on top.
+    final int epoch = DateTime.now().microsecondsSinceEpoch;
+    // [extra] alone is not always enough for GoRouter to treat this as a new
+    // navigation; a unique query + [replaceEpoch] pairs with [didUpdateWidget].
     context.go(
-      '/player',
+      Uri(
+        path: '/player',
+        queryParameters: <String, String>{'r': '$epoch'},
+      ).toString(),
       extra: PlayerScreenArgs(
         mediaItem: widget.args.mediaItem,
         streamResult: result,
@@ -2711,7 +2782,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         episodeTmdbId: widget.args.episodeTmdbId,
         seasonTitle: widget.args.seasonTitle,
         resumeFrom: _position.inSeconds,
-        replaceEpoch: DateTime.now().microsecondsSinceEpoch,
+        replaceEpoch: epoch,
       ),
     );
   }
