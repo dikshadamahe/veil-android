@@ -172,7 +172,11 @@ class ScrapeEvent {
       return fallbackIds
           .map(
             (dynamic entry) =>
-                ScrapeSourceDefinition(id: '$entry', name: '$entry'),
+                ScrapeSourceDefinition(
+                  id: '$entry',
+                  name: '$entry',
+                  type: 'source',
+                ),
           )
           .toList();
     }

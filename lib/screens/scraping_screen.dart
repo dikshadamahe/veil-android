@@ -504,7 +504,8 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     try {
       final StreamResult? result = await _streamService.scrapeSingleSource(
         widget.mediaItem,
-        sourceId: sourceId,
+        selectedId: sourceId,
+        selectedType: 'source',
         season: widget.season,
         episode: widget.episode,
         seasonTmdbId: widget.seasonTmdbId,
