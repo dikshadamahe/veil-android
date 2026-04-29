@@ -59,26 +59,6 @@ class _MergedSubtitleLang {
   }
 }
 
-/// GET /sources `sources` plus `embeds`, deduped by id (embed-only scrapers).
-List<ScrapeSourceDefinition> _mergedCatalogSources(ScrapeCatalog? catalog) {
-  if (catalog == null) {
-    return const <ScrapeSourceDefinition>[];
-  }
-  final Map<String, ScrapeSourceDefinition> byId =
-      <String, ScrapeSourceDefinition>{};
-  for (final ScrapeSourceDefinition s in catalog.sources) {
-    if (s.id.isNotEmpty) {
-      byId.putIfAbsent(s.id, () => s);
-    }
-  }
-  for (final ScrapeSourceDefinition e in catalog.embeds) {
-    if (e.id.isNotEmpty) {
-      byId.putIfAbsent(e.id, () => e);
-    }
-  }
-  return byId.values.toList();
-}
-
 class PlayerScreenArgs {
   const PlayerScreenArgs({
     required this.mediaItem,
@@ -1211,7 +1191,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   }
 
                   final List<ScrapeSourceDefinition> sources =
-                      _mergedCatalogSources(snapshot.data);
+                      snapshot.data?.sources ?? const <ScrapeSourceDefinition>[];
 
                   return _PlayerOptionSheet(
                     title: 'Sources',
@@ -2818,16 +2798,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
-  /// [ScrapeSourceDefinition.id] for the stream now playing: embed when set.
+  /// Active top-level source for the current playback session.
   String get _currentCatalogSourceId {
     if (_sourceSwitching &&
         _pendingSourceId != null &&
         _pendingSourceId!.trim().isNotEmpty) {
       return _pendingSourceId!.trim();
-    }
-    final String? e = widget.args.streamResult.embedId;
-    if (e != null && e.trim().isNotEmpty) {
-      return e.trim();
     }
     return widget.args.streamResult.sourceId;
   }
@@ -2839,10 +2815,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return '${_pendingSourceLabel!.trim()}...';
     }
     final StreamResult r = widget.args.streamResult;
-    if (r.embedName != null && r.embedName!.trim().isNotEmpty) {
-      return r.embedName!.trim();
+    final String sourceName = r.sourceName.trim();
+    final String embedName = r.embedName?.trim() ?? '';
+    if (embedName.isNotEmpty && embedName != sourceName) {
+      return '$sourceName • $embedName';
     }
-    return r.sourceName;
+    return sourceName;
   }
 
   String get _currentQualityLabel {
