@@ -136,6 +136,17 @@ function sortEmbedsForSelection(embeds, targetEmbedId) {
   });
 }
 
+function sortEmbedsByCatalog(embeds) {
+  const embedCatalog = providers.listEmbeds().map((embed) => embed.id);
+  return [...embeds].sort((a, b) => {
+    const aIndex = embedCatalog.indexOf(a.embedId);
+    const bIndex = embedCatalog.indexOf(b.embedId);
+    const safeA = aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex;
+    const safeB = bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex;
+    return safeA - safeB;
+  });
+}
+
 function isSelectionMiss(error) {
   if (!error) {
     return false;
@@ -200,6 +211,63 @@ async function runEmbedFromSource({ media, sourceId, embedId }) {
   return null;
 }
 
+async function runSelectedSourceOnly({ media, sourceId }) {
+  const sourceMeta = providers.getMetadata(sourceId);
+
+  let sourceOutput;
+  try {
+    sourceOutput = await providers.runSourceScraper({
+      media,
+      id: sourceId,
+    });
+  } catch (error) {
+    if (isSelectionMiss(error)) {
+      return null;
+    }
+    throw error;
+  }
+
+  if (sourceOutput?.stream?.[0]) {
+    return normalizeRunOutput(
+      {
+        sourceId,
+        stream: sourceOutput.stream[0],
+      },
+      sourceMeta,
+      null,
+    );
+  }
+
+  const sortedEmbeds = sortEmbedsByCatalog(sourceOutput?.embeds || []);
+  for (const embed of sortedEmbeds) {
+    try {
+      const embedOutput = await providers.runEmbedScraper({
+        url: embed.url,
+        id: embed.embedId,
+      });
+
+      if (embedOutput?.stream?.[0]) {
+        const embedMeta = providers.getMetadata(embed.embedId);
+        return normalizeRunOutput(
+          {
+            sourceId,
+            embedId: embed.embedId,
+            stream: embedOutput.stream[0],
+          },
+          sourceMeta,
+          embedMeta,
+        );
+      }
+    } catch (error) {
+      if (isSelectionMiss(error)) {
+        continue;
+      }
+    }
+  }
+
+  return null;
+}
+
 async function runExplicitSelection(query, media) {
   const selectedId = parseNonEmptyString(query.selectedId);
   const selectedType = parseNonEmptyString(query.selectedType);
@@ -209,25 +277,10 @@ async function runExplicitSelection(query, media) {
   }
 
   if (selectedType === "source") {
-    let output;
-    try {
-      output = await providers.runAll({
-        media,
-        sourceOrder: [selectedId],
-      });
-    } catch (error) {
-      if (isSelectionMiss(error)) {
-        return null;
-      }
-      throw error;
-    }
-
-    if (!output || output.sourceId !== selectedId) {
-      return null;
-    }
-    const sourceMeta = providers.getMetadata(output.sourceId);
-    const embedMeta = output.embedId ? providers.getMetadata(output.embedId) : null;
-    return normalizeRunOutput(output, sourceMeta, embedMeta);
+    return runSelectedSourceOnly({
+      media,
+      sourceId: selectedId,
+    });
   }
 
   if (selectedType === "embed") {
