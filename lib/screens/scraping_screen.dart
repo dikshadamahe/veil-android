@@ -75,6 +75,8 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
   Timer? _sourceRotateTimer;
   int _rotateIndex = 0;
 
+  String get _scrapeMediaType => widget.mediaItem.isShow ? 'show' : 'movie';
+
   @override
   void initState() {
     super.initState();
@@ -267,7 +269,10 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     }
 
     setState(() {
-      for (final ScrapeSourceDefinition source in sources) {
+      for (final ScrapeSourceDefinition source in sources.where(
+        (ScrapeSourceDefinition source) =>
+            source.supportsMediaType(_scrapeMediaType),
+      )) {
         if (source.id.isEmpty) {
           continue;
         }

@@ -190,12 +190,14 @@ class ScrapeSourceDefinition {
     required this.id,
     required this.name,
     required this.type,
+    this.mediaTypes = const <String>[],
     this.embedScraperId,
   });
 
   final String id;
   final String name;
   final String type;
+  final List<String> mediaTypes;
   final String? embedScraperId;
 
   factory ScrapeSourceDefinition.fromJson(dynamic json) {
@@ -212,6 +214,10 @@ class ScrapeSourceDefinition {
           '${map['name'] ?? map['embedScraperId'] ?? map['id'] ?? map['scraperId'] ?? ''}'
               .trim(),
       type: '${map['type'] ?? 'source'}'.trim(),
+      mediaTypes: ((map['mediaTypes'] as List?) ?? const <dynamic>[])
+          .map((dynamic item) => '$item'.trim().toLowerCase())
+          .where((String item) => item.isNotEmpty)
+          .toList(),
       embedScraperId: _parseNullableString(map['embedScraperId']),
     );
   }
@@ -221,8 +227,19 @@ class ScrapeSourceDefinition {
       'id': id,
       'name': name,
       'type': type,
+      if (mediaTypes.isNotEmpty) 'mediaTypes': mediaTypes,
       if (embedScraperId != null) 'embedScraperId': embedScraperId,
     };
+  }
+
+  bool supportsMediaType(String mediaType) {
+    if (type != 'source') {
+      return false;
+    }
+    if (mediaTypes.isEmpty) {
+      return true;
+    }
+    return mediaTypes.contains(mediaType.toLowerCase());
   }
 
   static String? _parseNullableString(dynamic value) {

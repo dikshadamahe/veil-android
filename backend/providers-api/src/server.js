@@ -136,14 +136,38 @@ function sortEmbedsForSelection(embeds, targetEmbedId) {
   });
 }
 
+function isSelectionMiss(error) {
+  if (!error) {
+    return false;
+  }
+  const name = typeof error?.name === "string" ? error.name : "";
+  const message = typeof error?.message === "string" ? error.message : String(error);
+  return (
+    name === "NotFoundError" ||
+    message.includes("No streams found") ||
+    message.includes("No playable streams found") ||
+    message.includes("Source is not compatible") ||
+    message.includes("Source with ID not found") ||
+    message.includes("Embed with ID not found")
+  );
+}
+
 async function runEmbedFromSource({ media, sourceId, embedId }) {
   const sourceMeta = providers.getMetadata(sourceId);
   const embedMeta = providers.getMetadata(embedId);
 
-  const sourceOutput = await providers.runSourceScraper({
-    media,
-    id: sourceId,
-  });
+  let sourceOutput;
+  try {
+    sourceOutput = await providers.runSourceScraper({
+      media,
+      id: sourceId,
+    });
+  } catch (error) {
+    if (isSelectionMiss(error)) {
+      return null;
+    }
+    throw error;
+  }
 
   const matchingEmbeds = sortEmbedsForSelection(
     (sourceOutput.embeds || []).filter((entry) => entry.embedId === embedId),
@@ -185,46 +209,25 @@ async function runExplicitSelection(query, media) {
   }
 
   if (selectedType === "source") {
-    const sourceMeta = providers.getMetadata(selectedId);
-    const output = await providers.runSourceScraper({
-      media,
-      id: selectedId,
-    });
-
-    if (output?.stream?.[0]) {
-      return normalizeRunOutput(
-        {
-          sourceId: selectedId,
-          stream: output.stream[0],
-        },
-        sourceMeta,
-        null,
-      );
+    let output;
+    try {
+      output = await providers.runAll({
+        media,
+        sourceOrder: [selectedId],
+      });
+    } catch (error) {
+      if (isSelectionMiss(error)) {
+        return null;
+      }
+      throw error;
     }
 
-    const sourceEmbeds = output?.embeds || [];
-    if (sourceEmbeds.length === 0) {
+    if (!output || output.sourceId !== selectedId) {
       return null;
     }
-
-    const embedOrder = parseSourceOrder(query.embedOrder);
-    const preferredEmbedIds =
-      embedOrder && embedOrder.length > 0
-        ? embedOrder
-        : [...new Set(sourceEmbeds.map((entry) => entry.embedId))];
-
-    for (const embedId of preferredEmbedIds) {
-      const result = await runEmbedFromSource({
-        media,
-        sourceId: selectedId,
-        embedId,
-      });
-      if (result) {
-        return result;
-      }
-    }
-
-    return null;
+    const sourceMeta = providers.getMetadata(output.sourceId);
+    const embedMeta = output.embedId ? providers.getMetadata(output.embedId) : null;
+    return normalizeRunOutput(output, sourceMeta, embedMeta);
   }
 
   if (selectedType === "embed") {
@@ -240,6 +243,13 @@ async function runExplicitSelection(query, media) {
   }
 
   return null;
+}
+
+function hasExplicitSelection(query) {
+  return !!(
+    parseNonEmptyString(query.selectedId) &&
+    parseNonEmptyString(query.selectedType)
+  );
 }
 
 function withTimeout(promise, timeoutMs) {
@@ -259,9 +269,8 @@ async function runScrape(query) {
     throw error;
   }
 
-  const explicitSelection = await runExplicitSelection(query, parsed.media);
-  if (explicitSelection) {
-    return explicitSelection;
+  if (hasExplicitSelection(query)) {
+    return runExplicitSelection(query, parsed.media);
   }
 
   const sourceOrder = parseSourceOrder(query.sourceOrder);

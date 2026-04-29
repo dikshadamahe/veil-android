@@ -174,6 +174,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// top-right is the only affordance until the user taps it.
   bool _controlsLocked = false;
 
+  String get _scrapeMediaType => widget.args.mediaItem.isShow ? 'show' : 'movie';
+
   @override
   void initState() {
     super.initState();
@@ -1191,7 +1193,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   }
 
                   final List<ScrapeSourceDefinition> sources =
-                      snapshot.data?.sources ?? const <ScrapeSourceDefinition>[];
+                      (snapshot.data?.sources ?? const <ScrapeSourceDefinition>[])
+                          .where(
+                            (ScrapeSourceDefinition source) =>
+                                source.supportsMediaType(_scrapeMediaType),
+                          )
+                          .toList();
 
                   return _PlayerOptionSheet(
                     title: 'Sources',
@@ -1215,6 +1222,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                             mediaItem: widget.args.mediaItem,
                             season: widget.args.season,
                             episode: widget.args.episode,
+                            seasonTmdbId: widget.args.seasonTmdbId,
+                            episodeTmdbId: widget.args.episodeTmdbId,
+                            seasonTitle: widget.args.seasonTitle,
+                            resumeFrom: _position.inSeconds,
                           ),
                         ),
                       );
