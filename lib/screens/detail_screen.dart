@@ -718,50 +718,6 @@ class _PosterPanel extends StatelessWidget {
   }
 }
 
-class _DetailErrorState extends StatelessWidget {
-  const _DetailErrorState({required this.media, required this.message});
-
-  final MediaItem media;
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(AppSpacing.x5),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          IconButton(
-            onPressed: () => Navigator.of(context).maybePop(),
-            icon: const Icon(Icons.arrow_back_rounded),
-          ),
-          const SizedBox(height: AppSpacing.x4),
-          _PosterPanel(media: media),
-          const SizedBox(height: AppSpacing.x5),
-          Text(
-            media.title,
-            style: Theme.of(
-              context,
-            ).textTheme.headlineMedium?.copyWith(color: AppColors.typeEmphasis),
-          ),
-          const SizedBox(height: AppSpacing.x3),
-          Text(
-            'Could not load this title right now.',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: AppSpacing.x2),
-          Text(
-            message,
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.typeText),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _MetaChip extends StatelessWidget {
   const _MetaChip({required this.label});
 
