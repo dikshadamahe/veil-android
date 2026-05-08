@@ -30,7 +30,11 @@ final detailProvider = FutureProvider.family<MediaItem, DetailRequest>((
   Ref ref,
   DetailRequest request,
 ) {
-  return ref.read(tmdbServiceProvider).getDetails(request.id, request.type);
+  return ref.read(tmdbServiceProvider).getDetails(
+        request.id,
+        request.type,
+        fallback: request.fallback,
+      );
 });
 
 final seasonEpisodesProvider =
@@ -44,18 +48,26 @@ final seasonEpisodesProvider =
     });
 
 class DetailRequest {
-  const DetailRequest({required this.id, required this.type});
+  const DetailRequest({
+    required this.id,
+    required this.type,
+    this.fallback,
+  });
 
   final int id;
   final String type;
+  final MediaItem? fallback;
 
   @override
   bool operator ==(Object other) {
-    return other is DetailRequest && other.id == id && other.type == type;
+    return other is DetailRequest &&
+        other.id == id &&
+        other.type == type &&
+        other.fallback?.hiveKey() == fallback?.hiveKey();
   }
 
   @override
-  int get hashCode => Object.hash(id, type);
+  int get hashCode => Object.hash(id, type, fallback?.hiveKey());
 }
 
 class SeasonEpisodesRequest {

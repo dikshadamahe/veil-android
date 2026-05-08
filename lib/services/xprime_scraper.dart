@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:pstream_android/models/scrape_event.dart';
@@ -288,11 +287,7 @@ class XprimeScraper {
       }
     }
 
-    final OverlayState? overlay = Overlay.of(context, rootOverlay: true);
-    if (overlay == null) {
-      _log('overlay unavailable');
-      return null;
-    }
+    final OverlayState overlay = Overlay.of(context, rootOverlay: true);
 
     overlayEntry = OverlayEntry(
       builder: (BuildContext context) {
@@ -1205,7 +1200,7 @@ class XprimeScraper {
           label: fallbackLabel,
           raw: <String, dynamic>{
             'url': url,
-            if (fallbackLabel != null) 'label': fallbackLabel,
+            'label': fallbackLabel,
           },
         ),
       );

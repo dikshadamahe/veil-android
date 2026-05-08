@@ -3652,6 +3652,9 @@ class _PlayerSheetMetrics {
     required this.settingsCardHeight,
     required this.settingsSubtitleMaxLines,
     required this.optionIconConstraints,
+    required this.optionRowPadding,
+    required this.externalRowPadding,
+    required this.externalBadgeSize,
   });
 
   final double outerInset;
@@ -3663,6 +3666,9 @@ class _PlayerSheetMetrics {
   final double settingsCardHeight;
   final int settingsSubtitleMaxLines;
   final BoxConstraints optionIconConstraints;
+  final EdgeInsetsGeometry optionRowPadding;
+  final EdgeInsetsGeometry externalRowPadding;
+  final double externalBadgeSize;
 
   static _PlayerSheetMetrics of(BuildContext context) {
     final bool small = isSmallHandset(context);
@@ -3679,6 +3685,15 @@ class _PlayerSheetMetrics {
         width: small ? 40 : 44,
         height: small ? 40 : 44,
       ),
+      optionRowPadding: EdgeInsets.symmetric(
+        horizontal: AppSpacing.x2,
+        vertical: small ? AppSpacing.x2 : AppSpacing.x3,
+      ),
+      externalRowPadding: EdgeInsets.symmetric(
+        horizontal: AppSpacing.x2,
+        vertical: small ? AppSpacing.x2 : AppSpacing.x3,
+      ),
+      externalBadgeSize: small ? AppSpacing.x8 : AppSpacing.x10,
     );
   }
 
@@ -3686,10 +3701,10 @@ class _PlayerSheetMetrics {
     final Size size = MediaQuery.sizeOf(context);
     final double shortestSide = size.shortestSide;
     if (shortestSide < 380) {
-      return size.height * 0.30;
+      return size.height * 0.42;
     }
     if (shortestSide < 430) {
-      return size.height * 0.36;
+      return size.height * 0.44;
     }
     return size.height * 0.46;
   }
@@ -3712,16 +3727,14 @@ class _PlayerOptionRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerSheetMetrics metrics = _PlayerSheetMetrics.of(context);
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(AppSpacing.x4),
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.x2,
-            vertical: AppSpacing.x3,
-          ),
+          padding: metrics.optionRowPadding,
           child: Row(
             children: <Widget>[
               Expanded(
@@ -3783,21 +3796,19 @@ class _PlayerExternalOfferRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerSheetMetrics metrics = _PlayerSheetMetrics.of(context);
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(AppSpacing.x4),
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.x2,
-            vertical: AppSpacing.x3,
-          ),
+          padding: metrics.externalRowPadding,
           child: Row(
             children: <Widget>[
               Container(
-                width: AppSpacing.x10,
-                height: AppSpacing.x10,
+                width: metrics.externalBadgeSize,
+                height: metrics.externalBadgeSize,
                 decoration: BoxDecoration(
                   color: AppColors.blackC125,
                   borderRadius: BorderRadius.circular(AppSpacing.x3),

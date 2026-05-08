@@ -20,87 +20,107 @@ class TmdbService {
   static final Uri _baseUri = Uri.parse('https://api.themoviedb.org/3/');
 
   Future<List<MediaItem>> getTrending(String type, String window) async {
-    final String tmdbType = _normalizeTrendingType(type);
-    final Map<String, dynamic> json = await _getJson(
-      'trending/$tmdbType/$window',
-    );
+    try {
+      final String tmdbType = _normalizeTrendingType(type);
+      final Map<String, dynamic> json = await _getJson(
+        'trending/$tmdbType/$window',
+      );
 
-    return ((json['results'] as List?) ?? const <dynamic>[])
-        .map(
-          (dynamic item) => MediaItem.fromTmdb(
-            Map<String, dynamic>.from(item as Map? ?? const {}),
-          ),
-        )
-        .where((MediaItem item) => item.tmdbId > 0)
-        .toList();
+      return ((json['results'] as List?) ?? const <dynamic>[])
+          .map(
+            (dynamic item) => MediaItem.fromTmdb(
+              Map<String, dynamic>.from(item as Map? ?? const {}),
+            ),
+          )
+          .where((MediaItem item) => item.tmdbId > 0)
+          .toList();
+    } catch (_) {
+      return const <MediaItem>[];
+    }
   }
 
   Future<List<MediaItem>> search(String query) async {
-    final String trimmedQuery = query.trim();
-    if (trimmedQuery.isEmpty) {
+    try {
+      final String trimmedQuery = query.trim();
+      if (trimmedQuery.isEmpty) {
+        return const <MediaItem>[];
+      }
+
+      final Map<String, dynamic> json = await _getJson(
+        'search/multi',
+        queryParameters: <String, String>{
+          'query': trimmedQuery,
+          'include_adult': 'false',
+          'page': '1',
+        },
+      );
+
+      final List<Map<String, dynamic>> results =
+          ((json['results'] as List?) ?? const <dynamic>[])
+              .map(
+                (dynamic item) => Map<String, dynamic>.from(
+                  item as Map? ?? const <String, dynamic>{},
+                ),
+              )
+              .toList();
+
+      final List<MediaItem> directMatches = results
+          .where(_isSearchableMedia)
+          .map(MediaItem.fromTmdb)
+          .where((MediaItem item) => item.tmdbId > 0)
+          .toList();
+
+      final List<MediaItem> peopleMatches = results
+          .where((Map<String, dynamic> item) {
+            return '${item['media_type'] ?? ''}'.toLowerCase() == 'person';
+          })
+          .expand(_knownForMedia)
+          .map(MediaItem.fromTmdb)
+          .where((MediaItem item) => item.tmdbId > 0)
+          .toList();
+
+      return _dedupeMediaItems(<MediaItem>[...directMatches, ...peopleMatches]);
+    } catch (_) {
       return const <MediaItem>[];
     }
-
-    final Map<String, dynamic> json = await _getJson(
-      'search/multi',
-      queryParameters: <String, String>{
-        'query': trimmedQuery,
-        'include_adult': 'false',
-        'page': '1',
-      },
-    );
-
-    final List<Map<String, dynamic>> results =
-        ((json['results'] as List?) ?? const <dynamic>[])
-            .map(
-              (dynamic item) => Map<String, dynamic>.from(
-                item as Map? ?? const <String, dynamic>{},
-              ),
-            )
-            .toList();
-
-    final List<MediaItem> directMatches = results
-        .where(_isSearchableMedia)
-        .map(MediaItem.fromTmdb)
-        .where((MediaItem item) => item.tmdbId > 0)
-        .toList();
-
-    final List<MediaItem> peopleMatches = results
-        .where((Map<String, dynamic> item) {
-          return '${item['media_type'] ?? ''}'.toLowerCase() == 'person';
-        })
-        .expand(_knownForMedia)
-        .map(MediaItem.fromTmdb)
-        .where((MediaItem item) => item.tmdbId > 0)
-        .toList();
-
-    return _dedupeMediaItems(<MediaItem>[...directMatches, ...peopleMatches]);
   }
 
-  Future<MediaItem> getDetails(int id, String type) async {
-    final String endpointType = _normalizeDetailType(type);
-    final Map<String, dynamic> json = await _getJson(
-      '$endpointType/$id',
-      queryParameters: const <String, String>{
-        'append_to_response': 'external_ids,credits',
-      },
-    );
+  Future<MediaItem> getDetails(
+    int id,
+    String type, {
+    MediaItem? fallback,
+  }) async {
+    try {
+      final String endpointType = _normalizeDetailType(type);
+      final Map<String, dynamic> json = await _getJson(
+        '$endpointType/$id',
+        queryParameters: const <String, String>{
+          'append_to_response': 'external_ids,credits',
+        },
+      );
 
-    return MediaItem.fromTmdb(json);
+      return MediaItem.fromTmdb(json);
+    } catch (_) {
+      return fallback ?? _fallbackMediaItem(id: id, type: type);
+    }
   }
 
   Future<List<Episode>> getSeasonEpisodes(int showId, int seasonNum) async {
-    final Map<String, dynamic> json = await _getJson(
-      'tv/$showId/season/$seasonNum',
-    );
+    try {
+      final Map<String, dynamic> json = await _getJson(
+        'tv/$showId/season/$seasonNum',
+      );
 
-    return ((json['episodes'] as List?) ?? const <dynamic>[])
-        .map(
-          (dynamic episode) => Episode.fromTmdb(
-            Map<String, dynamic>.from(episode as Map? ?? const {}),
-          ),
-        )
-        .toList();
+      return ((json['episodes'] as List?) ?? const <dynamic>[])
+          .map(
+            (dynamic episode) => Episode.fromTmdb(
+              Map<String, dynamic>.from(episode as Map? ?? const {}),
+            ),
+          )
+          .toList();
+    } catch (_) {
+      return const <Episode>[];
+    }
   }
 
   Future<Map<String, dynamic>> _getJson(
@@ -109,7 +129,7 @@ class TmdbService {
   }) async {
     final String token = AppConfig.tmdbReadToken.trim();
     if (token.isEmpty) {
-      throw StateError('TMDB_TOKEN is missing.');
+      return const <String, dynamic>{};
     }
 
     final Uri uri = _baseUri
@@ -265,6 +285,24 @@ class TmdbService {
   }
 
   static String _cacheKey(Uri uri) => uri.toString();
+
+  static MediaItem _fallbackMediaItem({
+    required int id,
+    required String type,
+  }) {
+    return MediaItem(
+      tmdbId: id,
+      type: _normalizeDetailType(type) == 'tv' ? 'show' : 'movie',
+      title: '',
+      overview: '',
+      posterPath: null,
+      backdropPath: null,
+      year: 0,
+      imdbId: null,
+      rating: 0,
+      seasons: const [],
+    );
+  }
 
   static bool _isSearchableMedia(Map<String, dynamic> item) {
     final String mediaType = '${item['media_type'] ?? ''}'.toLowerCase();

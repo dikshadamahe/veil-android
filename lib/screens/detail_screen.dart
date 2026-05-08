@@ -174,12 +174,15 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         : size.height * 0.42;
     final AsyncValue<MediaItem> details = ref.watch(
       detailProvider(
-        DetailRequest(id: widget.mediaItem.tmdbId, type: widget.mediaItem.type),
+        DetailRequest(
+          id: widget.mediaItem.tmdbId,
+          type: widget.mediaItem.type,
+          fallback: widget.mediaItem,
+        ),
       ),
     );
-    final MediaItem media = details.value ?? widget.mediaItem;
+    final MediaItem media = details.valueOrNull ?? widget.mediaItem;
     final bool isLoading = details.isLoading;
-    final Object? loadError = details.hasError ? details.error : null;
     final bool isBookmarked = ref.watch(bookmarkStatusProvider(media));
     final bool isCompact = layout == WindowClass.compact;
     // Floating poster card overlaps the backdrop bottom edge on compact, so
@@ -189,25 +192,42 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     return Scaffold(
       backgroundColor: AppColors.backgroundMain,
       body: SafeArea(
-        child: loadError != null
-            ? _DetailErrorState(media: widget.mediaItem, message: '$loadError')
-            : CustomScrollView(
-                slivers: <Widget>[
-                  SliverAppBar(
-                    expandedHeight: heroHeight + heroBottomPad,
-                    pinned: true,
-                    backgroundColor: AppColors.backgroundMain,
-                    flexibleSpace: FlexibleSpaceBar(
-                      background: isCompact
-                          ? _CompactDetailHero(media: media)
-                          : _DetailBackdrop(media: media),
-                    ),
-                  ),
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.all(AppSpacing.x4),
-                      child: isCompact
-                          ? _DetailBody(
+        child: CustomScrollView(
+          slivers: <Widget>[
+            SliverAppBar(
+              expandedHeight: heroHeight + heroBottomPad,
+              pinned: true,
+              backgroundColor: AppColors.backgroundMain,
+              flexibleSpace: FlexibleSpaceBar(
+                background: isCompact
+                    ? _CompactDetailHero(media: media)
+                    : _DetailBackdrop(media: media),
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.all(AppSpacing.x4),
+                child: isCompact
+                    ? _DetailBody(
+                        media: media,
+                        isLoading: isLoading,
+                        isBookmarked: isBookmarked,
+                        overviewExpanded: _overviewExpanded,
+                        onToggleBookmark: () => _toggleBookmark(media),
+                        onToggleOverview: () {
+                          setState(() {
+                            _overviewExpanded = !_overviewExpanded;
+                          });
+                        },
+                        onPlay: () => _handlePlay(media),
+                        onCreditTap: _openCreditSearch,
+                      )
+                    : Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Expanded(
+                            flex: 2,
+                            child: _DetailBody(
                               media: media,
                               isLoading: isLoading,
                               isBookmarked: isBookmarked,
@@ -220,36 +240,16 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
                               },
                               onPlay: () => _handlePlay(media),
                               onCreditTap: _openCreditSearch,
-                            )
-                          : Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: <Widget>[
-                                Expanded(
-                                  flex: 2,
-                                  child: _DetailBody(
-                                    media: media,
-                                    isLoading: isLoading,
-                                    isBookmarked: isBookmarked,
-                                    overviewExpanded: _overviewExpanded,
-                                    onToggleBookmark: () =>
-                                        _toggleBookmark(media),
-                                    onToggleOverview: () {
-                                      setState(() {
-                                        _overviewExpanded = !_overviewExpanded;
-                                      });
-                                    },
-                                    onPlay: () => _handlePlay(media),
-                                    onCreditTap: _openCreditSearch,
-                                  ),
-                                ),
-                                const SizedBox(width: AppSpacing.x6),
-                                Expanded(child: _PosterPanel(media: media)),
-                              ],
                             ),
-                    ),
-                  ),
-                ],
+                          ),
+                          const SizedBox(width: AppSpacing.x6),
+                          Expanded(child: _PosterPanel(media: media)),
+                        ],
+                      ),
               ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -621,7 +621,7 @@ class _DetailBody extends StatelessWidget {
           ),
           const SizedBox(height: AppSpacing.x3),
           SizedBox(
-            height: AppSpacing.x30,
+            height: AppSpacing.x30 + AppSpacing.x4,
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
               itemCount: media.credits.length,
@@ -652,21 +652,28 @@ class _DetailBody extends StatelessWidget {
                                   : null,
                             ),
                             const SizedBox(height: AppSpacing.x2),
-                            Text(
-                              credit.name,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.center,
-                              style: Theme.of(context).textTheme.labelMedium,
-                            ),
-                            if ((credit.character ?? '').trim().isNotEmpty)
-                              Text(
-                                credit.character!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                textAlign: TextAlign.center,
-                                style: Theme.of(context).textTheme.bodySmall,
+                            Expanded(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: <Widget>[
+                                  Text(
+                                    credit.name,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center,
+                                    style: Theme.of(context).textTheme.labelMedium,
+                                  ),
+                                  if ((credit.character ?? '').trim().isNotEmpty)
+                                    Text(
+                                      credit.character!,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      textAlign: TextAlign.center,
+                                      style: Theme.of(context).textTheme.bodySmall,
+                                    ),
+                                ],
                               ),
+                            ),
                           ],
                         ),
                       ),
