@@ -25,6 +25,7 @@ dependencies:
   screen_brightness: ^2.1.1
   file_picker: ^11.0.2
   path_provider: ^2.1.5
+  flutter_inappwebview: ^6.0.0
 
 dev_dependencies:
   flutter_test:

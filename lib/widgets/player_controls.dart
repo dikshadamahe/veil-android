@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:pstream_android/config/breakpoints.dart';
 import 'package:pstream_android/config/app_theme.dart';
 
 class PlayerControls extends StatelessWidget {
@@ -54,6 +55,8 @@ class PlayerControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerControlMetrics metrics = _PlayerControlMetrics.of(context);
+
     return IgnorePointer(
       ignoring: !visible,
       child: RepaintBoundary(
@@ -64,17 +67,20 @@ class PlayerControls extends StatelessWidget {
             fit: StackFit.expand,
             children: <Widget>[
               Positioned(
-                left: AppSpacing.x4,
-                right: AppSpacing.x4,
-                top: AppSpacing.x4,
+                left: metrics.edgeInset,
+                right: metrics.edgeInset,
+                top: metrics.edgeInset,
                 child: _GlassContainer(
+                  padding: metrics.barPadding,
                   child: Row(
                     children: <Widget>[
                       IconButton(
                         onPressed: onBack,
+                        visualDensity: VisualDensity.compact,
+                        constraints: metrics.iconConstraints,
                         icon: const Icon(Icons.arrow_back_rounded),
                       ),
-                      const SizedBox(width: AppSpacing.x2),
+                      SizedBox(width: metrics.compactGap),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -82,9 +88,10 @@ class PlayerControls extends StatelessWidget {
                           children: <Widget>[
                             Text(
                               mediaTitle,
-                              maxLines: 2,
+                              maxLines: metrics.titleMaxLines,
                               overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.titleLarge,
+                              style: Theme.of(context).textTheme.titleLarge
+                                  ?.copyWith(fontSize: metrics.titleSize),
                             ),
                           ],
                         ),
@@ -96,11 +103,8 @@ class PlayerControls extends StatelessWidget {
               Center(
                 child: RepaintBoundary(
                   child: _GlassContainer(
-                    borderRadius: BorderRadius.circular(AppSpacing.x16),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.x4,
-                      vertical: AppSpacing.x3,
-                    ),
+                    borderRadius: BorderRadius.circular(metrics.centerRadius),
+                    padding: metrics.centerPadding,
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
@@ -108,15 +112,18 @@ class PlayerControls extends StatelessWidget {
                           onPressed: () {
                             onSeekBack();
                           },
-                          iconSize: AppSpacing.x8,
+                          visualDensity: VisualDensity.compact,
+                          constraints: metrics.iconConstraints,
+                          iconSize: metrics.seekIconSize,
                           icon: const Icon(Icons.replay_10_rounded),
                         ),
-                        const SizedBox(width: AppSpacing.x2),
+                        SizedBox(width: metrics.compactGap),
                         FilledButton(
                           style: FilledButton.styleFrom(
                             shape: const CircleBorder(),
-                            padding: const EdgeInsets.all(AppSpacing.x4),
+                            padding: EdgeInsets.all(metrics.playButtonPadding),
                             backgroundColor: AppColors.buttonsPurple,
+                            minimumSize: Size.square(metrics.playButtonSize),
                           ),
                           onPressed: () {
                             onPlayPause();
@@ -125,15 +132,17 @@ class PlayerControls extends StatelessWidget {
                             isPlaying
                                 ? Icons.pause_rounded
                                 : Icons.play_arrow_rounded,
-                            size: AppSpacing.x10,
+                            size: metrics.playIconSize,
                           ),
                         ),
-                        const SizedBox(width: AppSpacing.x2),
+                        SizedBox(width: metrics.compactGap),
                         IconButton(
                           onPressed: () {
                             onSeekForward();
                           },
-                          iconSize: AppSpacing.x8,
+                          visualDensity: VisualDensity.compact,
+                          constraints: metrics.iconConstraints,
+                          iconSize: metrics.seekIconSize,
                           icon: const Icon(Icons.forward_10_rounded),
                         ),
                       ],
@@ -142,15 +151,15 @@ class PlayerControls extends StatelessWidget {
                 ),
               ),
               Positioned(
-                left: AppSpacing.x4,
-                right: AppSpacing.x4,
-                bottom: AppSpacing.x4,
+                left: metrics.edgeInset,
+                right: metrics.edgeInset,
+                bottom: metrics.edgeInset,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
                     if (showNextEpisode)
                       Padding(
-                        padding: const EdgeInsets.only(bottom: AppSpacing.x3),
+                        padding: EdgeInsets.only(bottom: metrics.compactGap),
                         child: RepaintBoundary(
                           child: Align(
                             alignment: Alignment.centerRight,
@@ -165,6 +174,7 @@ class PlayerControls extends StatelessWidget {
                         ),
                       ),
                     _GlassContainer(
+                      padding: metrics.barPadding,
                       child: Column(
                         children: <Widget>[
                           _SeekBar(
@@ -173,23 +183,27 @@ class PlayerControls extends StatelessWidget {
                             buffered: buffered,
                             onSeek: onSeek,
                           ),
-                          const SizedBox(height: AppSpacing.x3),
+                          SizedBox(height: metrics.compactGap),
                           Row(
                             children: <Widget>[
                               Text(
                                 _formatDuration(position),
-                                style: Theme.of(context).textTheme.labelMedium,
+                                style: Theme.of(context).textTheme.labelMedium
+                                    ?.copyWith(fontSize: metrics.timeTextSize),
                               ),
-                              const SizedBox(width: AppSpacing.x2),
+                              SizedBox(width: metrics.compactGap),
                               Text(
                                 '/ ${_formatDuration(duration)}',
-                                style: Theme.of(context).textTheme.labelMedium,
+                                style: Theme.of(context).textTheme.labelMedium
+                                    ?.copyWith(fontSize: metrics.timeTextSize),
                               ),
                               const Spacer(),
                               IconButton(
                                 onPressed: () {
                                   unawaited(onOpenBrightness());
                                 },
+                                visualDensity: VisualDensity.compact,
+                                constraints: metrics.iconConstraints,
                                 icon: const Icon(Icons.brightness_6_rounded),
                                 tooltip: 'Brightness',
                               ),
@@ -197,6 +211,8 @@ class PlayerControls extends StatelessWidget {
                                 onPressed: () {
                                   unawaited(onOpenVolume());
                                 },
+                                visualDensity: VisualDensity.compact,
+                                constraints: metrics.iconConstraints,
                                 icon: const Icon(Icons.volume_up_rounded),
                                 tooltip: 'Volume',
                               ),
@@ -204,6 +220,8 @@ class PlayerControls extends StatelessWidget {
                                 onPressed: () {
                                   onOpenSettings();
                                 },
+                                visualDensity: VisualDensity.compact,
+                                constraints: metrics.iconConstraints,
                                 icon: const Icon(Icons.settings_outlined),
                                 tooltip: 'Settings',
                               ),
@@ -211,6 +229,8 @@ class PlayerControls extends StatelessWidget {
                                 onPressed: () {
                                   onToggleAutoRotate();
                                 },
+                                visualDensity: VisualDensity.compact,
+                                constraints: metrics.iconConstraints,
                                 icon: Icon(
                                   autoRotate
                                       ? Icons.screen_rotation_rounded
@@ -222,6 +242,8 @@ class PlayerControls extends StatelessWidget {
                               ),
                               IconButton(
                                 onPressed: onLock,
+                                visualDensity: VisualDensity.compact,
+                                constraints: metrics.iconConstraints,
                                 icon: const Icon(
                                   Icons.lock_outline_rounded,
                                 ),
@@ -285,6 +307,7 @@ class _SeekBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerControlMetrics metrics = _PlayerControlMetrics.of(context);
     final double totalMs = duration.inMilliseconds.toDouble();
     final double bufferedFraction = totalMs <= 0
         ? 0
@@ -313,48 +336,48 @@ class _SeekBar extends StatelessWidget {
               onSeek(fraction);
             },
             child: SizedBox(
-              height: AppSpacing.x12,
+              height: metrics.seekBarHeight,
               child: Center(
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: <Widget>[
                     Container(
-                      height: AppSpacing.x1,
+                      height: metrics.seekTrackHeight,
                       decoration: BoxDecoration(
                         color: AppColors.progressBackground.withValues(
                           alpha: 0.35,
                         ),
-                        borderRadius: BorderRadius.circular(AppSpacing.x2),
+                        borderRadius: BorderRadius.circular(metrics.trackRadius),
                       ),
                     ),
                     FractionallySizedBox(
                       widthFactor: bufferedFraction,
                       child: Container(
-                        height: AppSpacing.x1,
+                        height: metrics.seekTrackHeight,
                         decoration: BoxDecoration(
                           color: AppColors.semanticSilverC400,
-                          borderRadius: BorderRadius.circular(AppSpacing.x2),
+                          borderRadius: BorderRadius.circular(metrics.trackRadius),
                         ),
                       ),
                     ),
                     FractionallySizedBox(
                       widthFactor: playedFraction,
                       child: Container(
-                        height: AppSpacing.x1,
+                        height: metrics.seekTrackHeight,
                         decoration: BoxDecoration(
                           color: AppColors.progressFilled,
-                          borderRadius: BorderRadius.circular(AppSpacing.x2),
+                          borderRadius: BorderRadius.circular(metrics.trackRadius),
                         ),
                       ),
                     ),
                     Positioned(
                       left:
                           (constraints.maxWidth * playedFraction) -
-                          AppSpacing.x2,
-                      top: -AppSpacing.x2,
+                          metrics.thumbRadius,
+                      top: -metrics.thumbRadius,
                       child: Container(
-                        width: AppSpacing.x4,
-                        height: AppSpacing.x4,
+                        width: metrics.thumbSize,
+                        height: metrics.thumbSize,
                         decoration: const BoxDecoration(
                           color: AppColors.progressFilled,
                           shape: BoxShape.circle,
@@ -385,8 +408,9 @@ class _GlassActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerControlMetrics metrics = _PlayerControlMetrics.of(context);
     return _GlassContainer(
-      borderRadius: BorderRadius.circular(AppSpacing.x10),
+      borderRadius: BorderRadius.circular(metrics.pillRadius),
       child: TextButton.icon(
         onPressed: () {
           onPressed();
@@ -439,6 +463,89 @@ class _GlassContainer extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _PlayerControlMetrics {
+  const _PlayerControlMetrics({
+    required this.edgeInset,
+    required this.compactGap,
+    required this.barPadding,
+    required this.centerPadding,
+    required this.iconConstraints,
+    required this.seekIconSize,
+    required this.playIconSize,
+    required this.playButtonPadding,
+    required this.playButtonSize,
+    required this.centerRadius,
+    required this.titleSize,
+    required this.titleMaxLines,
+    required this.timeTextSize,
+    required this.seekBarHeight,
+    required this.seekTrackHeight,
+    required this.trackRadius,
+    required this.thumbSize,
+    required this.thumbRadius,
+    required this.pillRadius,
+  });
+
+  final double edgeInset;
+  final double compactGap;
+  final EdgeInsetsGeometry barPadding;
+  final EdgeInsetsGeometry centerPadding;
+  final BoxConstraints iconConstraints;
+  final double seekIconSize;
+  final double playIconSize;
+  final double playButtonPadding;
+  final double playButtonSize;
+  final double centerRadius;
+  final double titleSize;
+  final int titleMaxLines;
+  final double timeTextSize;
+  final double seekBarHeight;
+  final double seekTrackHeight;
+  final double trackRadius;
+  final double thumbSize;
+  final double thumbRadius;
+  final double pillRadius;
+
+  static _PlayerControlMetrics of(BuildContext context) {
+    final Size size = MediaQuery.sizeOf(context);
+    final HandsetDensity density = handsetDensity(context);
+    final bool small = density == HandsetDensity.small;
+    final bool regular = density == HandsetDensity.regular;
+    final bool shortLandscape = size.height < 420;
+
+    return _PlayerControlMetrics(
+      edgeInset: small ? AppSpacing.x2 : AppSpacing.x4,
+      compactGap: small ? AppSpacing.x1 : AppSpacing.x2,
+      barPadding: EdgeInsets.symmetric(
+        horizontal: small ? AppSpacing.x3 : AppSpacing.x4,
+        vertical: small ? AppSpacing.x2 : AppSpacing.x3,
+      ),
+      centerPadding: EdgeInsets.symmetric(
+        horizontal: small ? AppSpacing.x3 : AppSpacing.x4,
+        vertical: small ? AppSpacing.x2 : AppSpacing.x3,
+      ),
+      iconConstraints: BoxConstraints.tightFor(
+        width: small ? 40 : 44,
+        height: small ? 40 : 44,
+      ),
+      seekIconSize: small ? AppSpacing.x6 : AppSpacing.x8,
+      playIconSize: small ? AppSpacing.x8 : AppSpacing.x10,
+      playButtonPadding: small ? AppSpacing.x3 : AppSpacing.x4,
+      playButtonSize: small ? 44 : 52,
+      centerRadius: small ? AppSpacing.x12 : AppSpacing.x16,
+      titleSize: small ? 16 : 20,
+      titleMaxLines: shortLandscape ? 1 : 2,
+      timeTextSize: small ? 11 : 13,
+      seekBarHeight: small ? AppSpacing.x8 : AppSpacing.x12,
+      seekTrackHeight: small ? 3 : AppSpacing.x1,
+      trackRadius: small ? AppSpacing.x1 : AppSpacing.x2,
+      thumbSize: small ? AppSpacing.x3 : AppSpacing.x4,
+      thumbRadius: small ? 6 : AppSpacing.x2,
+      pillRadius: regular ? AppSpacing.x8 : AppSpacing.x10,
     );
   }
 }

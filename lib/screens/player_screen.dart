@@ -12,6 +12,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pstream_android/config/app_config.dart';
+import 'package:pstream_android/config/breakpoints.dart';
 import 'package:pstream_android/config/app_theme.dart';
 import 'package:pstream_android/models/external_subtitle_offer.dart';
 import 'package:pstream_android/models/media_item.dart';
@@ -25,6 +26,7 @@ import 'package:pstream_android/screens/scraping_screen.dart';
 import 'package:pstream_android/services/external_subtitle_service.dart';
 import 'package:pstream_android/services/stream_service.dart'
     show ScrapeCatalog, StreamService;
+import 'package:pstream_android/services/xprime_scraper.dart';
 import 'package:pstream_android/storage/local_storage.dart';
 import 'package:pstream_android/utils/player_native_tune.dart';
 import 'package:pstream_android/widgets/player_controls.dart';
@@ -163,6 +165,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   StreamCaption? _selectedCaption;
   late final StorageController _storageController;
   late final StreamService _streamService;
+  late final XprimeScraper _xprimeScraper;
 
   /// When true, player only allows landscape orientations (auto-flips between
   /// left/right). When false, follows the device — phones can stay portrait.
@@ -182,6 +185,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     WidgetsBinding.instance.addObserver(this);
     _storageController = ref.read(storageControllerProvider);
     _streamService = ref.read(streamServiceProvider);
+    _xprimeScraper = const XprimeScraper();
     _applyUserPlaybackPrefs();
     _applyPlayerChrome();
     _bindPlayerStreams();
@@ -845,9 +849,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Future<void> _openStream({int? resumeFrom}) async {
     final StreamPlayback playback = widget.args.streamResult.stream;
     final String? url = _selectedQualityUrl ?? _resolvePlayableUrl(playback);
-    final Map<String, String> headers = playback.preferredHeaders.isNotEmpty
-        ? playback.preferredHeaders
-        : playback.headers;
+    final Map<String, String> headers = url == null
+        ? const <String, String>{}
+        : _resolvedPlaybackHeaders(playback, url);
 
     if (url == null || url.isEmpty) {
       if (!mounted) {
@@ -1143,17 +1147,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _sourceProbeStatus[s.id] = _SourceStreamStatus.loading;
       _sourceProbeUi.value++;
       try {
-        final StreamResult? r = await _streamService.scrapeSingleSource(
-          widget.args.mediaItem,
-          selectedId: s.id,
-          selectedType: s.type,
-          parentSourceId: widget.args.streamResult.sourceId,
-          season: widget.args.season,
-          episode: widget.args.episode,
-          seasonTmdbId: widget.args.seasonTmdbId,
-          episodeTmdbId: widget.args.episodeTmdbId,
-          seasonTitle: widget.args.seasonTitle,
-        );
+        final StreamResult? r = await _scrapeResultForSource(s);
         if (!mounted) {
           break;
         }
@@ -1175,6 +1169,49 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  bool _isXprimeSource(ScrapeSourceDefinition source) {
+    return source.id.startsWith('xprime:');
+  }
+
+  String? _xprimeProviderForSource(ScrapeSourceDefinition source) {
+    if (!_isXprimeSource(source)) {
+      return null;
+    }
+    final String provider = source.id.substring('xprime:'.length).trim();
+    if (provider.isEmpty || provider == 'auto') {
+      return null;
+    }
+    return provider;
+  }
+
+  Future<StreamResult?> _scrapeResultForSource(
+    ScrapeSourceDefinition source,
+  ) async {
+    if (_isXprimeSource(source)) {
+      return _xprimeScraper.scrape(
+        context: context,
+        tmdbId: '${widget.args.mediaItem.tmdbId}',
+        title: widget.args.mediaItem.title,
+        year: widget.args.mediaItem.year,
+        season: widget.args.season,
+        episode: widget.args.episode,
+        provider: _xprimeProviderForSource(source),
+      );
+    }
+
+    return _streamService.scrapeSingleSource(
+      widget.args.mediaItem,
+      selectedId: source.id,
+      selectedType: source.type,
+      parentSourceId: widget.args.streamResult.sourceId,
+      season: widget.args.season,
+      episode: widget.args.episode,
+      seasonTmdbId: widget.args.seasonTmdbId,
+      episodeTmdbId: widget.args.episodeTmdbId,
+      seasonTitle: widget.args.seasonTitle,
+    );
+  }
+
   Future<void> _openSourceSheet() async {
     _showControls();
     final ScrapeSourceDefinition? selectedSource =
@@ -1192,13 +1229,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     );
                   }
 
-                  final List<ScrapeSourceDefinition> sources =
+                  final List<ScrapeSourceDefinition> backendSources =
                       (snapshot.data?.sources ?? const <ScrapeSourceDefinition>[])
                           .where(
                             (ScrapeSourceDefinition source) =>
                                 source.supportsMediaType(_scrapeMediaType),
                           )
                           .toList();
+                  final List<ScrapeSourceDefinition> sources =
+                      <ScrapeSourceDefinition>[
+                    ...XprimeScraper.sourceDefinitions,
+                    ...backendSources,
+                  ];
 
                   return _PlayerOptionSheet(
                     title: 'Sources',
@@ -1271,6 +1313,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _showControls();
     final List<MapEntry<String, StreamQuality>> qualities = _availableQualities;
     final bool hasQualities = qualities.isNotEmpty;
+    final bool hasMultipleQualities = qualities.length > 1;
 
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
@@ -1282,7 +1325,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               child: _PlayerOptionSheet(
                 title: 'Quality',
                 onBack: () => Navigator.of(context).pop(),
-                footer: hasQualities
+                footer: hasMultipleQualities
                     ? _PlayerToggleRow(
                         title: 'Automatic quality',
                         subtitle:
@@ -1925,17 +1968,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
     try {
       await _persistProgress();
-      final StreamResult? result = await _streamService.scrapeSingleSource(
-        widget.args.mediaItem,
-        selectedId: source.id,
-        selectedType: source.type,
-        parentSourceId: widget.args.streamResult.sourceId,
-        season: widget.args.season,
-        episode: widget.args.episode,
-        seasonTmdbId: widget.args.seasonTmdbId,
-        episodeTmdbId: widget.args.episodeTmdbId,
-        seasonTitle: widget.args.seasonTitle,
-      );
+      final StreamResult? result = await _scrapeResultForSource(source);
 
       if (!mounted) {
         return;
@@ -3015,14 +3048,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   String? _resolvePlayableUrl(StreamPlayback playback) {
+    if (playback.playbackUrl?.isNotEmpty == true) {
+      return playback.playbackUrl;
+    }
     if (playback.proxiedPlaylist?.isNotEmpty == true) {
       return playback.proxiedPlaylist;
     }
     if (playback.playlist?.isNotEmpty == true) {
       return playback.playlist;
-    }
-    if (playback.playbackUrl?.isNotEmpty == true) {
-      return playback.playbackUrl;
     }
 
     final String? selectedQuality = playback.selectedQuality;
@@ -3038,6 +3071,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
 
     return null;
+  }
+
+  Map<String, String> _resolvedPlaybackHeaders(
+    StreamPlayback playback,
+    String url,
+  ) {
+    final Uri? uri = Uri.tryParse(url);
+    final String host = uri?.host.toLowerCase() ?? '';
+    if (host == 'veil-m3u8-proxy.veilproxy.workers.dev') {
+      return const <String, String>{};
+    }
+    return playback.preferredHeaders.isNotEmpty
+        ? playback.preferredHeaders
+        : playback.headers;
   }
 }
 
@@ -3282,23 +3329,24 @@ class _PlayerSheetScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerSheetMetrics metrics = _PlayerSheetMetrics.of(context);
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          AppSpacing.x3,
-          AppSpacing.x3,
-          AppSpacing.x3,
-          AppSpacing.x4,
+        padding: EdgeInsets.fromLTRB(
+          metrics.outerInset,
+          metrics.outerInset,
+          metrics.outerInset,
+          metrics.bottomInset,
         ),
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: AppColors.blackC50.withValues(alpha: 0.98),
-            borderRadius: BorderRadius.circular(AppSpacing.x5),
+            borderRadius: BorderRadius.circular(metrics.sheetRadius),
             border: Border.all(color: AppColors.videoContextBorder),
           ),
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(AppSpacing.x5),
+            borderRadius: BorderRadius.circular(metrics.sheetRadius),
             child: child,
           ),
         ),
@@ -3328,35 +3376,59 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerSheetMetrics metrics = _PlayerSheetMetrics.of(context);
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(AppSpacing.x4),
+      padding: EdgeInsets.all(metrics.contentPadding),
       child: Column(
         // [stretch] so the lone Subtitles card fills the full sheet width.
         // Row children already fill internally, coming-soon tiles too.
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           // Two cards side-by-side: Quality + Source.
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: _PlayerSettingsCard(
-                  title: 'Quality',
-                  subtitle: qualityLabel,
-                  onTap: onQualityTap,
-                ),
-              ),
-              const SizedBox(width: AppSpacing.x3),
-              Expanded(
-                child: _PlayerSettingsCard(
-                  title: 'Source',
-                  subtitle: sourceLabel,
-                  loading: sourceSwitching,
-                  onTap: onSourceTap,
-                ),
-              ),
-            ],
+          LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) {
+              final bool stackCards = constraints.maxWidth < 360;
+              if (stackCards) {
+                return Column(
+                  children: <Widget>[
+                    _PlayerSettingsCard(
+                      title: 'Quality',
+                      subtitle: qualityLabel,
+                      onTap: onQualityTap,
+                    ),
+                    SizedBox(height: metrics.itemGap),
+                    _PlayerSettingsCard(
+                      title: 'Source',
+                      subtitle: sourceLabel,
+                      loading: sourceSwitching,
+                      onTap: onSourceTap,
+                    ),
+                  ],
+                );
+              }
+              return Row(
+                children: <Widget>[
+                  Expanded(
+                    child: _PlayerSettingsCard(
+                      title: 'Quality',
+                      subtitle: qualityLabel,
+                      onTap: onQualityTap,
+                    ),
+                  ),
+                  SizedBox(width: metrics.itemGap),
+                  Expanded(
+                    child: _PlayerSettingsCard(
+                      title: 'Source',
+                      subtitle: sourceLabel,
+                      loading: sourceSwitching,
+                      onTap: onSourceTap,
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
-          const SizedBox(height: AppSpacing.x3),
+          SizedBox(height: metrics.itemGap),
           // Subtitles spans full width — replaces the old 2x2 layout that
           // also held a non-clickable "Audio" tile (always HLS).
           _PlayerSettingsCard(
@@ -3364,7 +3436,7 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
             subtitle: subtitleLabel,
             onTap: onSubtitlesTap,
           ),
-          const SizedBox(height: AppSpacing.x4),
+          SizedBox(height: metrics.sectionGap),
           // Web-parity rows (Download / Watch Party) kept as coming-soon
           // affordances so users know the feature surface exists.
           const _PlayerComingSoonTile(
@@ -3376,7 +3448,7 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
             icon: Icons.podcasts_rounded,
             title: 'Watch Party',
           ),
-          const SizedBox(height: AppSpacing.x3),
+          SizedBox(height: metrics.itemGap),
           const _PlayerComingSoonTile(
             icon: Icons.skip_next_rounded,
             title: 'Skip Segments',
@@ -3437,11 +3509,12 @@ class _PlayerSettingsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerSheetMetrics metrics = _PlayerSheetMetrics.of(context);
     // Now used inside Row+Expanded for a true 2x2 grid; the card simply
     // fills its column. Fixed inner height keeps the four cards aligned
     // even when subtitle/source labels wrap to two lines.
     return SizedBox(
-      height: AppSpacing.x20,
+      height: metrics.settingsCardHeight,
       child: Material(
         color: AppColors.blackC125,
         borderRadius: BorderRadius.circular(AppSpacing.x4),
@@ -3449,9 +3522,9 @@ class _PlayerSettingsCard extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(AppSpacing.x4),
           child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: AppSpacing.x4,
-              vertical: AppSpacing.x4,
+            padding: EdgeInsets.symmetric(
+              horizontal: metrics.contentPadding,
+              vertical: metrics.contentPadding,
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -3478,7 +3551,7 @@ class _PlayerSettingsCard extends StatelessWidget {
                 const SizedBox(height: AppSpacing.x1),
                 Text(
                   subtitle,
-                  maxLines: 1,
+                  maxLines: metrics.settingsSubtitleMaxLines,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: AppColors.typeSecondary,
@@ -3514,8 +3587,9 @@ class _PlayerOptionSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final _PlayerSheetMetrics metrics = _PlayerSheetMetrics.of(context);
     return Padding(
-      padding: const EdgeInsets.all(AppSpacing.x4),
+      padding: EdgeInsets.all(metrics.contentPadding),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -3524,9 +3598,11 @@ class _PlayerOptionSheet extends StatelessWidget {
             children: <Widget>[
               IconButton(
                 onPressed: onBack,
+                visualDensity: VisualDensity.compact,
+                constraints: metrics.optionIconConstraints,
                 icon: const Icon(Icons.arrow_back_rounded),
               ),
-              const SizedBox(width: AppSpacing.x2),
+              SizedBox(width: metrics.itemGap),
               Expanded(
                 child: Text(
                   title,
@@ -3544,22 +3620,78 @@ class _PlayerOptionSheet extends StatelessWidget {
                 ),
             ],
           ),
-          const SizedBox(height: AppSpacing.x3),
+          SizedBox(height: metrics.itemGap),
           const Divider(color: AppColors.utilsDivider, height: AppSpacing.x0),
-          const SizedBox(height: AppSpacing.x3),
-          SizedBox(
-            height: MediaQuery.sizeOf(context).height * 0.46,
+          SizedBox(height: metrics.itemGap),
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: metrics.optionBodyMaxHeight(context),
+            ),
             child: child,
           ),
           if (footer != null) ...<Widget>[
-            const SizedBox(height: AppSpacing.x3),
+            SizedBox(height: metrics.itemGap),
             const Divider(color: AppColors.utilsDivider, height: AppSpacing.x0),
-            const SizedBox(height: AppSpacing.x3),
+            SizedBox(height: metrics.itemGap),
             footer!,
           ],
         ],
       ),
     );
+  }
+}
+
+class _PlayerSheetMetrics {
+  const _PlayerSheetMetrics({
+    required this.outerInset,
+    required this.bottomInset,
+    required this.sheetRadius,
+    required this.contentPadding,
+    required this.itemGap,
+    required this.sectionGap,
+    required this.settingsCardHeight,
+    required this.settingsSubtitleMaxLines,
+    required this.optionIconConstraints,
+  });
+
+  final double outerInset;
+  final double bottomInset;
+  final double sheetRadius;
+  final double contentPadding;
+  final double itemGap;
+  final double sectionGap;
+  final double settingsCardHeight;
+  final int settingsSubtitleMaxLines;
+  final BoxConstraints optionIconConstraints;
+
+  static _PlayerSheetMetrics of(BuildContext context) {
+    final bool small = isSmallHandset(context);
+    return _PlayerSheetMetrics(
+      outerInset: small ? AppSpacing.x2 : AppSpacing.x3,
+      bottomInset: small ? AppSpacing.x3 : AppSpacing.x4,
+      sheetRadius: small ? AppSpacing.x4 : AppSpacing.x5,
+      contentPadding: small ? AppSpacing.x3 : AppSpacing.x4,
+      itemGap: small ? AppSpacing.x2 : AppSpacing.x3,
+      sectionGap: small ? AppSpacing.x3 : AppSpacing.x4,
+      settingsCardHeight: small ? 68 : AppSpacing.x20,
+      settingsSubtitleMaxLines: small ? 2 : 1,
+      optionIconConstraints: BoxConstraints.tightFor(
+        width: small ? 40 : 44,
+        height: small ? 40 : 44,
+      ),
+    );
+  }
+
+  double optionBodyMaxHeight(BuildContext context) {
+    final Size size = MediaQuery.sizeOf(context);
+    final double shortestSide = size.shortestSide;
+    if (shortestSide < 380) {
+      return size.height * 0.30;
+    }
+    if (shortestSide < 430) {
+      return size.height * 0.36;
+    }
+    return size.height * 0.46;
   }
 }
 

@@ -1,5 +1,6 @@
-import 'dart:convert';
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:pstream_android/config/app_config.dart';
@@ -11,8 +12,11 @@ class TmdbService {
 
   static final Map<String, _CacheEntry<dynamic>> _cache =
       <String, _CacheEntry<dynamic>>{};
+  static final Map<String, Future<Map<String, dynamic>>> _inFlight =
+      <String, Future<Map<String, dynamic>>>{};
   static const Duration _cacheTtl = Duration(minutes: 60);
   static const Duration _requestTimeout = Duration(seconds: 30);
+  static const int _maxAttempts = 3;
   static final Uri _baseUri = Uri.parse('https://api.themoviedb.org/3/');
 
   Future<List<MediaItem>> getTrending(String type, String window) async {
@@ -120,45 +124,98 @@ class TmdbService {
       return Map<String, dynamic>.from(cached.value as Map);
     }
 
-    final http.Client client = http.Client();
-    try {
-      final http.Response response = await _sendWithRetry(client, uri, token);
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        if (response.statusCode == 401) {
-          throw Exception(
-            'TMDB authorization failed. Check TMDB_TOKEN and rebuild the app.',
-          );
+    final Future<Map<String, dynamic>>? pending = _inFlight[cacheKey];
+    if (pending != null) {
+      try {
+        return Map<String, dynamic>.from(await pending);
+      } on Exception catch (error) {
+        if (cached != null) {
+          return Map<String, dynamic>.from(cached.value as Map);
         }
-        throw http.ClientException(
-          'TMDB request failed (${response.statusCode}) for $uri',
-          uri,
-        );
+        throw Exception('TMDB request failed: $error');
       }
+    }
 
-      final Map<String, dynamic> json = Map<String, dynamic>.from(
-        jsonDecode(response.body) as Map,
-      );
-      _cache[cacheKey] = _CacheEntry<dynamic>(json, now);
-      return json;
+    final Future<Map<String, dynamic>> request = _fetchJson(
+      uri: uri,
+      token: token,
+      cacheKey: cacheKey,
+      now: now,
+    );
+    _inFlight[cacheKey] = request;
+    try {
+      return Map<String, dynamic>.from(await request);
     } on Exception catch (error) {
+      if (cached != null) {
+        return Map<String, dynamic>.from(cached.value as Map);
+      }
       throw Exception('TMDB request failed: $error');
     } finally {
-      client.close();
+      _inFlight.remove(cacheKey);
     }
   }
 
-  Future<http.Response> _sendWithRetry(
-    http.Client client,
-    Uri uri,
-    String token,
-  ) async {
-    try {
-      return await _send(client, uri, token);
-    } on TimeoutException {
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-      return _send(client, uri, token);
+  Future<Map<String, dynamic>> _fetchJson({
+    required Uri uri,
+    required String token,
+    required String cacheKey,
+    required DateTime now,
+  }) async {
+    final http.Response response = await _sendWithRetry(uri, token);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (response.statusCode == 401) {
+        throw Exception(
+          'TMDB authorization failed. Check TMDB_TOKEN and rebuild the app.',
+        );
+      }
+      throw http.ClientException(
+        'TMDB request failed (${response.statusCode}) for $uri',
+        uri,
+      );
     }
+
+    final Map<String, dynamic> json = Map<String, dynamic>.from(
+      jsonDecode(response.body) as Map,
+    );
+    _cache[cacheKey] = _CacheEntry<dynamic>(json, now);
+    return json;
+  }
+
+  Future<http.Response> _sendWithRetry(Uri uri, String token) async {
+    Object? lastError;
+
+    for (int attempt = 0; attempt < _maxAttempts; attempt++) {
+      final http.Client client = http.Client();
+      try {
+        final http.Response response = await _send(client, uri, token);
+        if (!_isRetryableStatus(response.statusCode) ||
+            attempt == _maxAttempts - 1) {
+          return response;
+        }
+        lastError = http.ClientException(
+          'TMDB transient failure (${response.statusCode}) for $uri',
+          uri,
+        );
+      } on TimeoutException catch (error) {
+        lastError = error;
+      } on SocketException catch (error) {
+        lastError = error;
+      } on http.ClientException catch (error) {
+        lastError = error;
+      } finally {
+        client.close();
+      }
+
+      if (attempt < _maxAttempts - 1) {
+        final int delayMs = 350 * (attempt + 1);
+        await Future<void>.delayed(Duration(milliseconds: delayMs));
+      }
+    }
+
+    if (lastError != null) {
+      throw lastError;
+    }
+    throw Exception('TMDB request failed.');
   }
 
   Future<http.Response> _send(http.Client client, Uri uri, String token) {
@@ -168,9 +225,20 @@ class TmdbService {
           headers: <String, String>{
             'accept': 'application/json',
             'Authorization': 'Bearer $token',
+            'user-agent': 'Veil-Android/1.0',
           },
         )
         .timeout(_requestTimeout);
+  }
+
+  static bool _isRetryableStatus(int statusCode) {
+    return statusCode == 408 ||
+        statusCode == 425 ||
+        statusCode == 429 ||
+        statusCode == 500 ||
+        statusCode == 502 ||
+        statusCode == 503 ||
+        statusCode == 504;
   }
 
   static String _normalizeTrendingType(String value) {
@@ -180,10 +248,10 @@ class TmdbService {
       'movie' => 'movie',
       'all' => 'all',
       _ => throw ArgumentError.value(
-        value,
-        'type',
-        'Expected movie, show, tv, or all.',
-      ),
+          value,
+          'type',
+          'Expected movie, show, tv, or all.',
+        ),
     };
   }
 
