@@ -581,6 +581,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     try {
       final StreamResult? result = sourceId.startsWith('xprime:')
           ? await _xprimeScraper.scrape(
+              // ignore: use_build_context_synchronously
               context: context,
               tmdbId: '${widget.mediaItem.tmdbId}',
               title: widget.mediaItem.title,
