@@ -257,8 +257,10 @@ class XprimeScraper {
           playlistUrl.toLowerCase().endsWith('.m3u8');
 
       if (needsHlsParsing) {
+        _log('fetching HLS playlist: $playlistUrl');
         final Map<String, StreamQuality> hlsVariants =
             await _fetchHlsVariants(playlistUrl);
+        _log('HLS fetch result: ${hlsVariants.isEmpty ? "EMPTY" : hlsVariants.keys.join(",")}');
         if (hlsVariants.isNotEmpty) {
           // Use HLS variants if we got any
           final String defaultQuality = _pickMobileDefaultQuality(hlsVariants);
@@ -1043,8 +1045,10 @@ class XprimeScraper {
     }
 
     if (playlistContent == null) {
+      _log('_fetchHlsVariants: failed to fetch playlist');
       return result;
     }
+    _log('_fetchHlsVariants: got playlist, length=${playlistContent.length}');
 
     // Check if this is a master playlist (has #EXT-X-STREAM-INF)
     if (!playlistContent.contains('#EXT-X-STREAM-INF')) {
