@@ -4,6 +4,8 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:http/http.dart' as http;
+import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/models/scrape_event.dart';
 import 'package:pstream_android/models/stream_result.dart';
 
@@ -246,6 +248,92 @@ class XprimeScraper {
         return;
       }
       final StreamResult result = await attachSessionHeaders(builtResult);
+
+      // Fetch HLS master playlist variants if we have a single m3u8 URL with few qualities
+      final String? playlistUrl = result.stream.playlist?.trim();
+      final bool needsHlsParsing = playlistUrl != null &&
+          playlistUrl.isNotEmpty &&
+          playlistUrl.toLowerCase().endsWith('.m3u8') &&
+          result.stream.qualities.length < 2;
+
+      if (needsHlsParsing) {
+        final Map<String, StreamQuality> hlsVariants =
+            await _fetchHlsVariants(playlistUrl);
+        if (hlsVariants.isNotEmpty) {
+          // Use HLS variants if we got any
+          final String defaultQuality = _pickMobileDefaultQuality(hlsVariants);
+          final StreamResult updatedResult = StreamResult(
+            sourceId: result.sourceId,
+            sourceName: result.sourceName,
+            embedId: result.embedId,
+            embedName: result.embedName,
+            stream: StreamPlayback(
+              id: result.stream.id,
+              type: result.stream.type,
+              playlist: result.stream.playlist,
+              proxiedPlaylist: result.stream.proxiedPlaylist,
+              playbackUrl: defaultQuality.isNotEmpty
+                  ? hlsVariants[defaultQuality]?.url ?? result.stream.playbackUrl
+                  : result.stream.playbackUrl,
+              playbackType: result.stream.playbackType,
+              selectedQuality: defaultQuality.isNotEmpty ? defaultQuality : null,
+              qualities: hlsVariants,
+              headers: result.stream.headers,
+              preferredHeaders: result.stream.preferredHeaders,
+              captions: result.stream.captions,
+              flags: result.stream.flags,
+            ),
+          );
+          final StreamResult withHeaders = await attachSessionHeaders(updatedResult);
+          _log('hls variants parsed: ${hlsVariants.keys.join(",")} default=$defaultQuality');
+          final String newKey =
+              '${withHeaders.sourceId}|${withHeaders.stream.playbackUrl}|${withHeaders.stream.selectedQuality}';
+          if (!seenPayloadKeys.add(newKey)) {
+            _log('hls variant duplicate ignored');
+            return;
+          }
+          unawaited(finish(withHeaders));
+          return;
+        }
+      }
+
+      // Apply mobile default quality (720p) if no explicit quality selected
+      final String? currentSelected = result.stream.selectedQuality;
+      if (currentSelected == null && result.stream.qualities.length > 1) {
+        final String mobileDefault = _pickMobileDefaultQuality(result.stream.qualities);
+        if (mobileDefault.isNotEmpty && result.stream.qualities.containsKey(mobileDefault)) {
+          final StreamResult mobileResult = StreamResult(
+            sourceId: result.sourceId,
+            sourceName: result.sourceName,
+            embedId: result.embedId,
+            embedName: result.embedName,
+            stream: StreamPlayback(
+              id: result.stream.id,
+              type: result.stream.type,
+              playlist: result.stream.playlist,
+              proxiedPlaylist: result.stream.proxiedPlaylist,
+              playbackUrl: result.stream.qualities[mobileDefault]?.url ?? result.stream.playbackUrl,
+              playbackType: result.stream.playbackType,
+              selectedQuality: mobileDefault,
+              qualities: result.stream.qualities,
+              headers: result.stream.headers,
+              preferredHeaders: result.stream.preferredHeaders,
+              captions: result.stream.captions,
+              flags: result.stream.flags,
+            ),
+          );
+          final StreamResult withHeaders = await attachSessionHeaders(mobileResult);
+          final String newKey =
+              '${withHeaders.sourceId}|${withHeaders.stream.playbackUrl}|${withHeaders.stream.selectedQuality}';
+          if (!seenPayloadKeys.add(newKey)) {
+            _log('mobile default duplicate ignored');
+            return;
+          }
+          unawaited(finish(withHeaders));
+          return;
+        }
+      }
+
       final String key =
           '${result.sourceId}|${result.stream.playbackUrl}|${result.stream.selectedQuality}';
       if (!seenPayloadKeys.add(key)) {
@@ -914,6 +1002,198 @@ class XprimeScraper {
     final List<String> segments = List<String>.from(uri.pathSegments);
     segments[0] = provider;
     return uri.replace(pathSegments: segments).toString();
+  }
+
+  /// Fetches and parses an HLS master playlist to extract quality variants.
+  /// Returns a map of quality label -> StreamQuality.
+  static Future<Map<String, StreamQuality>> _fetchHlsVariants(
+    String m3u8Url,
+  ) async {
+    final Map<String, StreamQuality> result = <String, StreamQuality>{};
+
+    // Try proxy first (bypasses CORS), then direct
+    String? playlistContent;
+    final List<String> urlsToTry = <String>[
+      '${AppConfig.proxyBaseUrl}/proxy?url=${Uri.encodeComponent(m3u8Url)}',
+      m3u8Url,
+    ];
+
+    for (final String url in urlsToTry) {
+      try {
+        final http.Response resp = await http
+            .get(Uri.parse(url))
+            .timeout(const Duration(seconds: 10));
+        if (resp.statusCode >= 200 && resp.statusCode < 300) {
+          playlistContent = resp.body;
+          break;
+        }
+      } catch (e) {
+        // Try next URL
+        continue;
+      }
+    }
+
+    if (playlistContent == null) {
+      return result;
+    }
+
+    // Check if this is a master playlist (has #EXT-X-STREAM-INF)
+    if (!playlistContent.contains('#EXT-X-STREAM-INF')) {
+      // Single variant or media playlist - return as-is with inferred quality
+      final String inferredQuality = _inferQualityFromUrl(m3u8Url);
+      if (inferredQuality.isNotEmpty) {
+        result[inferredQuality] = StreamQuality(url: m3u8Url, type: 'hls');
+      }
+      return result;
+    }
+
+    // Parse master playlist variants
+    final List<String> lines = playlistContent.split('\n');
+    String? pendingVariant;
+    int bandwidth = 0;
+
+    for (final String line in lines) {
+      final String trimmed = line.trim();
+      if (trimmed.startsWith('#EXT-X-STREAM-INF:')) {
+        // Parse BANDWIDTH and RESOLUTION
+        bandwidth = 0;
+        int? height;
+        final Map<String, String> params = _parseHlsAttributes(trimmed.substring('#EXT-X-STREAM-INF:'.length));
+        if (params.containsKey('BANDWIDTH')) {
+          bandwidth = int.tryParse(params['BANDWIDTH'] ?? '') ?? 0;
+        }
+        if (params.containsKey('RESOLUTION')) {
+          final String res = params['RESOLUTION'] ?? '';
+          final List<String> parts = res.split('x');
+          if (parts.length == 2) {
+            height = int.tryParse(parts[1]);
+          }
+        }
+        pendingVariant = 'bandwidth=$bandwidth${height != null ? ',height=$height' : ''}';
+      } else if (trimmed.isNotEmpty && !trimmed.startsWith('#') && pendingVariant != null) {
+        // This is the URL for the variant we just parsed
+        final String variantUrl = trimmed;
+        final String qualityLabel = _labelFromHlsVariant(bandwidth, pendingVariant);
+        result[qualityLabel] = StreamQuality(url: variantUrl, type: 'hls');
+        pendingVariant = null;
+        bandwidth = 0;
+      }
+    }
+
+    return result;
+  }
+
+  /// Parses HLS attribute list (key=value,key=value).
+  static Map<String, String> _parseHlsAttributes(String attrs) {
+    final Map<String, String> result = <String, String>{};
+    final List<String> pairs = <String>[];
+    String current = '';
+    bool inQuote = false;
+
+    for (int i = 0; i < attrs.length; i++) {
+      final String c = attrs[i];
+      if (c == '"') {
+        inQuote = !inQuote;
+        current += c;
+      } else if (c == ',' && !inQuote) {
+        pairs.add(current.trim());
+        current = '';
+      } else {
+        current += c;
+      }
+    }
+    if (current.trim().isNotEmpty) {
+      pairs.add(current.trim());
+    }
+
+    for (final String pair in pairs) {
+      final int eqIndex = pair.indexOf('=');
+      if (eqIndex > 0) {
+        final String key = pair.substring(0, eqIndex).trim();
+        String value = pair.substring(eqIndex + 1).trim();
+        if (value.startsWith('"') && value.endsWith('"')) {
+          value = value.substring(1, value.length - 1);
+        }
+        result[key] = value;
+      }
+    }
+    return result;
+  }
+
+  /// Creates a human-readable label from HLS variant info.
+  static String _labelFromHlsVariant(int bandwidth, String variantInfo) {
+    // Check for specific resolutions in variant info
+    if (variantInfo.contains(',height=2160') || bandwidth > 10000000) {
+      return '4K';
+    }
+    if (variantInfo.contains(',height=1080') || bandwidth > 3000000) {
+      return '1080p';
+    }
+    if (variantInfo.contains(',height=720') || bandwidth > 1500000) {
+      return '720p';
+    }
+    if (variantInfo.contains(',height=480') || bandwidth > 800000) {
+      return '480p';
+    }
+    if (variantInfo.contains(',height=360') || bandwidth > 400000) {
+      return '360p';
+    }
+    // Fallback based on bandwidth
+    if (bandwidth > 5000000) {
+      return '1080p';
+    }
+    if (bandwidth > 2000000) {
+      return '720p';
+    }
+    if (bandwidth > 1000000) {
+      return '480p';
+    }
+    return '360p';
+  }
+
+  /// Infers quality label from URL patterns (for single-variant streams).
+  static String _inferQualityFromUrl(String url) {
+    final String lower = url.toLowerCase();
+    if (lower.contains('2160p') || lower.contains('4k') || lower.contains('original')) {
+      return '4K';
+    }
+    if (lower.contains('1080p')) {
+      return '1080p';
+    }
+    if (lower.contains('720p')) {
+      return '720p';
+    }
+    if (lower.contains('480p')) {
+      return '480p';
+    }
+    if (lower.contains('360p')) {
+      return '360p';
+    }
+    return '';
+  }
+
+  /// Picks 720p as default quality for mobile playback.
+  /// Falls back to 480p if 720p is not available.
+  static String _pickMobileDefaultQuality(Map<String, StreamQuality> qualities) {
+    // Prefer 720p for mobile - balances quality and performance
+    if (qualities.containsKey('720p')) {
+      return '720p';
+    }
+    if (qualities.containsKey('480p')) {
+      return '480p';
+    }
+    if (qualities.containsKey('360p')) {
+      return '360p';
+    }
+    // If higher quality only, let player handle it but log warning
+    if (qualities.containsKey('1080p')) {
+      return '1080p';
+    }
+    if (qualities.containsKey('4K')) {
+      return '4K';
+    }
+    // Return empty string - let player pick default
+    return '';
   }
 
   static StreamResult? _buildStreamResult({

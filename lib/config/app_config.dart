@@ -13,10 +13,9 @@ class AppConfig {
 
   static bool get hasTmdbReadToken => tmdbReadToken.trim().isNotEmpty;
 
-  /// Fixed backend source order for the current Oracle build.
-  /// Priority: Finger (XPrime) is tried first in scraping_screen.
-  /// Then: Vidlink and Granite (vidrock) both work on this VM.
-  static const String scrapeSourceOrder = 'vidlink,vidrock';
+  /// Fixed backend source order for UI display.
+  /// Priority: Finger first, then VidLink, Granite, then rest.
+  static const String scrapeSourceOrder = 'finger,vidlink,vidrock';
 
   static List<String>? get scrapeSourceOrderList {
     final List<String> ids = scrapeSourceOrder
