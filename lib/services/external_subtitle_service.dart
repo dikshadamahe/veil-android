@@ -81,6 +81,7 @@ class ExternalSubtitleService {
           const Duration(seconds: 30),
           onTimeout: () {
             // Let partial results through - some sources may have completed
+            return <void>[];
           },
         );
       } catch (_) {
