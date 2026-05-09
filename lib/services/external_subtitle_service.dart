@@ -69,7 +69,7 @@ class ExternalSubtitleService {
 
     // VDRK subtitle search - works for movies only (no season/episode support)
     if (!media.isShow) {
-      futures.add(_searchVdrk(media.tmdbId).then((List<ExternalSubtitleOffer> results) {
+      futures.add(_searchVdrk('${media.tmdbId}').then((List<ExternalSubtitleOffer> results) {
         out.addAll(results);
       }).catchError((Object e) {
         errors.add('VDRK: $e');
