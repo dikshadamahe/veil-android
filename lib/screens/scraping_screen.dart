@@ -201,7 +201,8 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
         id: source.id,
         name: displayName,
       );
-      _sourceOrder.insert(0, source.id);
+      // Use add() not insert(0) to maintain sorted order (Finger first)
+      _sourceOrder.add(source.id);
       _statuses.putIfAbsent(
         source.id,
         () => ScrapeStatus.waiting,

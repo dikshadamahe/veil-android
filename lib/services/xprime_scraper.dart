@@ -249,12 +249,12 @@ class XprimeScraper {
       }
       final StreamResult result = await attachSessionHeaders(builtResult);
 
-      // Fetch HLS master playlist variants if we have a single m3u8 URL with few qualities
+      // Fetch HLS master playlist variants for all m3u8 URLs - the HLS master
+      // contains all available quality variants, not just what the API reports
       final String? playlistUrl = result.stream.playlist?.trim();
       final bool needsHlsParsing = playlistUrl != null &&
           playlistUrl.isNotEmpty &&
-          playlistUrl.toLowerCase().endsWith('.m3u8') &&
-          result.stream.qualities.length < 2;
+          playlistUrl.toLowerCase().endsWith('.m3u8');
 
       if (needsHlsParsing) {
         final Map<String, StreamQuality> hlsVariants =
