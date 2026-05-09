@@ -598,6 +598,7 @@ class XprimeScraper {
         host == 'mznxiwqjdiq00239q.space' ||
         host == 'oca.lihala-n-tmurt.workers.dev' ||
         host.endsWith('.xprime.stream') ||
+        host.endsWith('.website') ||
         host == 'xprime.stream';
   }
 
