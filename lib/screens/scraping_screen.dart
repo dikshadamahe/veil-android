@@ -366,10 +366,6 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     });
   }
 
-  /// True while the SSE scrape is in progress and we have not failed yet.
-  bool get _awaitingScrapeResult =>
-      !_allFailure && !_hasSuccess() && _failureMessage == null;
-
   List<String> _orderedSourceIdsForUi() {
     final Set<String> known = _nodes.keys.toSet();
     if (known.isEmpty) {
