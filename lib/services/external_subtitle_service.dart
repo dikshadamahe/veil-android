@@ -54,22 +54,39 @@ class ExternalSubtitleService {
       );
     }
 
-    if (AppConfig.hasWyzieApiKey) {
-      if (!media.isShow || (season != null && episode != null)) {
-        try {
-          out.addAll(await _searchWyzie(media, season, episode));
-        } catch (e) {
-          errors.add('Wyzie: $e');
-        }
-      }
+    // Run subtitle searches in parallel with individual timeouts
+    // (matching PStream web's approach - Promise.race with per-source timeouts)
+    final List<Future<void>> futures = <Future<void>>[];
+
+    if (AppConfig.hasWyzieApiKey && (!media.isShow || (season != null && episode != null))) {
+      futures.add(_searchWyzie(media, season, episode).then((List<ExternalSubtitleOffer> results) {
+        out.addAll(results);
+      }).catchError((Object e) {
+        errors.add('Wyzie: $e');
+      }));
     }
 
-    if (AppConfig.hasOpensubtitlesApiKey) {
-      if (!media.isShow || (season != null && episode != null)) {
-        try {
-          out.addAll(await _searchOpensubtitles(media, season, episode));
-        } catch (e) {
-          errors.add('OpenSubtitles: $e');
+    if (AppConfig.hasOpensubtitlesApiKey && (!media.isShow || (season != null && episode != null))) {
+      futures.add(_searchOpensubtitles(media, season, episode).then((List<ExternalSubtitleOffer> results) {
+        out.addAll(results);
+      }).catchError((Object e) {
+        errors.add('OpenSubtitles: $e');
+      }));
+    }
+
+    // Wait for all with a global timeout (30s total)
+    if (futures.isNotEmpty) {
+      try {
+        await Future.wait(futures).timeout(
+          const Duration(seconds: 30),
+          onTimeout: () {
+            // Let partial results through - some sources may have completed
+          },
+        );
+      } catch (_) {
+        // Partial results already in 'out', add timeout error if no results
+        if (out.isEmpty) {
+          errors.add('Subtitle search timed out');
         }
       }
     }

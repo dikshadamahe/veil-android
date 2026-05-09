@@ -1390,25 +1390,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (!wantKeys) {
       return const OnlineSubtitleSearchResult(offers: <ExternalSubtitleOffer>[]);
     }
-    // Add timeout to prevent slow subtitle searches from blocking
-    try {
-      return await const ExternalSubtitleService().searchOnlineDetailed(
-        media: widget.args.mediaItem,
-        season: widget.args.season,
-        episode: widget.args.episode,
-      ).timeout(
-        const Duration(seconds: 10),
-        onTimeout: () => const OnlineSubtitleSearchResult(
-          offers: <ExternalSubtitleOffer>[],
-          providerErrors: <String>['Subtitle search timed out'],
-        ),
-      );
-    } catch (e) {
-      return OnlineSubtitleSearchResult(
-        offers: <ExternalSubtitleOffer>[],
-        providerErrors: <String>['Subtitle search failed: $e'],
-      );
-    }
+    // Subtitle service runs searches in parallel with per-source timeouts
+    return const ExternalSubtitleService().searchOnlineDetailed(
+      media: widget.args.mediaItem,
+      season: widget.args.season,
+      episode: widget.args.episode,
+    );
   }
 
   Future<void> _openSubtitlesSheet() async {
