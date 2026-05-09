@@ -11,6 +11,7 @@ import 'package:pstream_android/models/stream_result.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/screens/player_screen.dart';
 import 'package:pstream_android/services/stream_service.dart';
+import 'package:pstream_android/services/xprime_scraper.dart';
 import 'package:pstream_android/widgets/scrape_source_card.dart'
     show ScrapeSourceCard, ScrapeStatus, StatusCircle;
 
@@ -67,13 +68,11 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
   StreamSubscription<ScrapeEvent>? _scrapeSubscription;
   late final StreamService _streamService;
+  late final XprimeScraper _xprimeScraper;
   bool _isLoading = true;
   bool _allFailure = false;
   String? _failureMessage;
   String? _currentPendingSourceId;
-  /// Cycles which row shows a spinner (Express does not stream per-source progress).
-  Timer? _sourceRotateTimer;
-  int _rotateIndex = 0;
 
   String get _scrapeMediaType => widget.mediaItem.isShow ? 'show' : 'movie';
 
@@ -81,15 +80,15 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
   void initState() {
     super.initState();
     _streamService = ref.read(streamServiceProvider);
+    _xprimeScraper = const XprimeScraper();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _startStreamScrape();
+      _startInitialScrapeSequence();
       unawaited(_primeCatalog());
     });
   }
 
   @override
   void dispose() {
-    _stopSourceRotation();
     _scrapeSubscription?.cancel();
     _scrollController.dispose();
     super.dispose();
@@ -132,8 +131,87 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     return result.failureReason ?? 'No sources in /sources response.';
   }
 
+  Future<void> _startInitialScrapeSequence() async {
+    _ensurePrimaryXprimeNode();
+    // Start with Finger (first XPrime source)
+    const String fingerSourceId = 'xprime:finger';
+    _updateStatus(fingerSourceId, ScrapeStatus.pending);
+    _setLoading(true);
+
+    try {
+      // Scrape with Finger provider specifically
+      final StreamResult? xprimeResult = await _xprimeScraper.scrape(
+        context: context,
+        tmdbId: '${widget.mediaItem.tmdbId}',
+        title: widget.mediaItem.title,
+        year: widget.mediaItem.year,
+        season: widget.season,
+        episode: widget.episode,
+        provider: 'finger',
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (xprimeResult != null) {
+        _updateStatus(fingerSourceId, ScrapeStatus.success);
+        _navigateToPlayer(xprimeResult);
+        return;
+      }
+
+      _updateStatus(fingerSourceId, ScrapeStatus.notfound);
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      _updateStatus(fingerSourceId, ScrapeStatus.failure);
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    _currentPendingSourceId = null;
+    _startStreamScrape();
+  }
+
+  void _ensurePrimaryXprimeNode() {
+    // Add individual XPrime sources instead of "Auto"
+    // Priority: Finger first, then rest in defined order
+    final List<ScrapeSourceDefinition> xprimeSources =
+        XprimeScraper.sourceDefinitions
+            .where((ScrapeSourceDefinition s) => s.id != XprimeScraper.autoSourceId)
+            .toList();
+
+    // Reorder so Finger is first
+    xprimeSources.sort((ScrapeSourceDefinition a, ScrapeSourceDefinition b) {
+      if (a.id == 'xprime:finger') return -1;
+      if (b.id == 'xprime:finger') return 1;
+      return a.id.compareTo(b.id);
+    });
+
+    for (final ScrapeSourceDefinition source in xprimeSources) {
+      if (_nodes.containsKey(source.id)) {
+        continue;
+      }
+      // Remove "(XPrime)" suffix from name - just show provider name
+      final String displayName = source.name.replaceAll(' (XPrime)', '');
+      _nodes[source.id] = _ScrapeNode(
+        id: source.id,
+        name: displayName,
+      );
+      _sourceOrder.insert(0, source.id);
+      _statuses.putIfAbsent(
+        source.id,
+        () => ScrapeStatus.waiting,
+      );
+    }
+  }
+
   void _startStreamScrape() {
     _scrapeSubscription?.cancel();
+    _currentPendingSourceId = null;
     _scrapeSubscription = _streamService
         .scrapeStream(
           widget.mediaItem,
@@ -190,7 +268,6 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
   }
 
   void _handleDone(ScrapeEvent event) {
-    _stopSourceRotation();
     _setLoading(false);
 
     final StreamResult? result = event.result;
@@ -241,11 +318,11 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return;
     }
 
-    _stopSourceRotation();
     final bool hadNoSourcesYet = _sourceOrder.isEmpty;
     setState(() {
       _isLoading = false;
       _failureMessage = message;
+      _currentPendingSourceId = null;
       if (!_hasSuccess()) {
         _allFailure = true;
         for (final String sourceId in _sourceOrder) {
@@ -285,12 +362,8 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
         _statuses.putIfAbsent(source.id, () => ScrapeStatus.waiting);
       }
-
       _isLoading = false;
     });
-    if (_sourceOrder.isNotEmpty && _awaitingScrapeResult) {
-      _startSourceRotation();
-    }
   }
 
   /// True while the SSE scrape is in progress and we have not failed yet.
@@ -303,14 +376,22 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return <String>[];
     }
     final List<String> out = <String>[];
+    // Add XPrime sources first (already ordered with Finger first)
+    for (final String id in _sourceOrder) {
+      if (id.startsWith('xprime:') && !out.contains(id)) {
+        out.add(id);
+      }
+    }
+    // Then add backend sources in preferred order
     final List<String>? preferred = AppConfig.scrapeSourceOrderList;
     if (preferred != null) {
       for (final String id in preferred) {
-        if (known.contains(id)) {
+        if (known.contains(id) && !out.contains(id)) {
           out.add(id);
         }
       }
     }
+    // Add any remaining sources
     for (final String id in _sourceOrder) {
       if (!out.contains(id)) {
         out.add(id);
@@ -319,60 +400,9 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     return out;
   }
 
-  void _startSourceRotation() {
-    _sourceRotateTimer?.cancel();
-    final List<String> ids = _orderedSourceIdsForUi();
-    if (ids.length <= 1) {
-      return;
-    }
-    _rotateIndex = 0;
-    _sourceRotateTimer = Timer.periodic(
-      const Duration(seconds: 5),
-      (Timer t) {
-        if (!mounted || !_awaitingScrapeResult) {
-          t.cancel();
-          return;
-        }
-        setState(() {
-          // Visualise progress: as the rotation moves to the next provider,
-          // mark the one we just left as failure (red X) — providers run in
-          // order server-side, so by the time we move on the previous one
-          // has been "tried" and didn't yield a stream.
-          if (_rotateIndex >= 0 && _rotateIndex < ids.length) {
-            final String prevId = ids[_rotateIndex];
-            final ScrapeStatus current =
-                _statuses[prevId] ?? ScrapeStatus.waiting;
-            if (current == ScrapeStatus.waiting ||
-                current == ScrapeStatus.pending) {
-              _statuses[prevId] = ScrapeStatus.failure;
-            }
-          }
-          _rotateIndex = (_rotateIndex + 1) % ids.length;
-        });
-      },
-    );
-  }
-
-  void _stopSourceRotation() {
-    _sourceRotateTimer?.cancel();
-    _sourceRotateTimer = null;
-  }
-
   ScrapeStatus _displayStatusForList(String id) {
-    // Active SSE-tracked source wins regardless of any failure mark — keeps
-    // the pending spinner on the slot the server says it's currently doing.
     if (_currentPendingSourceId == id) {
       return ScrapeStatus.pending;
-    }
-    // While the scrape is still running, the rotation pointer is the visual
-    // "currently checking" slot. It overrides a stale failure mark left by
-    // a previous full rotation cycle so the spinner doesn't get hidden by
-    // the cosmetic red-X we set when moving past a slot.
-    if (_awaitingScrapeResult) {
-      final List<String> ids = _orderedSourceIdsForUi();
-      if (ids.isNotEmpty && id == ids[_rotateIndex % ids.length]) {
-        return ScrapeStatus.pending;
-      }
     }
     final ScrapeStatus real = _statuses[id] ?? ScrapeStatus.waiting;
     if (real == ScrapeStatus.success ||
@@ -448,8 +478,44 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     return _statuses.values.contains(ScrapeStatus.success);
   }
 
-  Future<void> _showManualPicker() async {
-    if (_sourceOrder.isEmpty) {
+  List<String> _manualSourceIds() {
+    final List<String> ids = <String>[];
+    // Exclude auto source - show only individual XPrime providers
+    for (final ScrapeSourceDefinition source in XprimeScraper.sourceDefinitions
+        .where((s) => s.id != XprimeScraper.autoSourceId)) {
+      ids.add(source.id);
+    }
+    for (final String id in _orderedSourceIdsForUi()) {
+      if (!ids.contains(id)) {
+        ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  List<String> _xprimeSourceIds() {
+    return XprimeScraper.sourceDefinitions
+        .where((s) => s.id != XprimeScraper.autoSourceId)
+        .map((ScrapeSourceDefinition source) => source.id)
+        .toList();
+  }
+
+  String _labelForSourceId(String sourceId) {
+    final String? existing = _nodes[sourceId]?.name;
+    if (existing != null && existing.trim().isNotEmpty) {
+      return existing;
+    }
+    for (final ScrapeSourceDefinition source in XprimeScraper.sourceDefinitions) {
+      if (source.id == sourceId) {
+        // Remove "(XPrime)" suffix for cleaner display
+        return source.name.replaceAll(' (XPrime)', '');
+      }
+    }
+    return sourceId;
+  }
+
+  Future<void> _showManualPicker({bool xprimeOnly = false}) async {
+    if (!xprimeOnly && _sourceOrder.isEmpty) {
       final String? catalogErr = await _fetchAndApplyCatalog();
       if (!mounted || !context.mounted) {
         return;
@@ -469,19 +535,18 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     final String? sourceId = await showModalBottomSheet<String>(
       context: context,
       builder: (BuildContext context) {
+        final List<String> ids =
+            xprimeOnly ? _xprimeSourceIds() : _manualSourceIds();
         return SafeArea(
           child: ListView.builder(
-            itemCount: _sourceOrder.length,
+            itemCount: ids.length,
             itemBuilder: (BuildContext context, int index) {
-              final String id = _sourceOrder[index];
-              final _ScrapeNode? node = _nodes[id];
-              if (node == null) {
-                return const SizedBox.shrink();
-              }
+              final String id = ids[index];
+              final String label = _labelForSourceId(id);
 
               return ListTile(
                 minTileHeight: AppSpacing.x12,
-                title: Text(node.name),
+                title: Text(label),
                 onTap: () => Navigator.of(context).pop(id),
               );
             },
@@ -497,6 +562,10 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     await _retrySingleSource(sourceId);
   }
 
+  Future<void> _showXprimePicker() {
+    return _showManualPicker(xprimeOnly: true);
+  }
+
   Future<void> _retrySingleSource(String sourceId) async {
     setState(() {
       _allFailure = false;
@@ -504,19 +573,37 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       _isLoading = true;
       _statuses[sourceId] = ScrapeStatus.pending;
       _currentPendingSourceId = sourceId;
+      _nodes.putIfAbsent(
+        sourceId,
+        () => _ScrapeNode(
+          id: sourceId,
+          name: _labelForSourceId(sourceId),
+        ),
+      );
     });
 
     try {
-      final StreamResult? result = await _streamService.scrapeSingleSource(
-        widget.mediaItem,
-        selectedId: sourceId,
-        selectedType: 'source',
-        season: widget.season,
-        episode: widget.episode,
-        seasonTmdbId: widget.seasonTmdbId,
-        episodeTmdbId: widget.episodeTmdbId,
-        seasonTitle: widget.seasonTitle,
-      );
+      final StreamResult? result = sourceId.startsWith('xprime:')
+          ? await _xprimeScraper.scrape(
+              context: context,
+              tmdbId: '${widget.mediaItem.tmdbId}',
+              title: widget.mediaItem.title,
+              year: widget.mediaItem.year,
+              season: widget.season,
+              episode: widget.episode,
+              // Extract provider from xprime:<provider> format
+              provider: sourceId.substring('xprime:'.length),
+            )
+          : await _streamService.scrapeSingleSource(
+              widget.mediaItem,
+              selectedId: sourceId,
+              selectedType: 'source',
+              season: widget.season,
+              episode: widget.episode,
+              seasonTmdbId: widget.seasonTmdbId,
+              episodeTmdbId: widget.episodeTmdbId,
+              seasonTitle: widget.seasonTitle,
+            );
 
       if (!context.mounted) {
         return;
@@ -526,6 +613,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
         setState(() {
           _isLoading = false;
           _statuses[sourceId] = ScrapeStatus.notfound;
+          _currentPendingSourceId = null;
           _allFailure = true;
           _failureMessage = 'No sources found';
         });
@@ -535,6 +623,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       setState(() {
         _isLoading = false;
         _statuses[sourceId] = ScrapeStatus.success;
+        _currentPendingSourceId = null;
         if (result.embedId != null) {
           _statuses[result.embedId!] = ScrapeStatus.success;
         }
@@ -548,6 +637,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       setState(() {
         _isLoading = false;
         _statuses[sourceId] = ScrapeStatus.failure;
+        _currentPendingSourceId = null;
         _allFailure = true;
         _failureMessage = '$error';
       });
@@ -577,7 +667,15 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final List<String> orderedSources = _orderedSourceIdsForUi();
+    final List<String> baseOrderedSources = _orderedSourceIdsForUi();
+    final List<String> orderedSources = _currentPendingSourceId != null &&
+            _currentPendingSourceId!.startsWith('xprime:')
+        ? <String>[
+            ...baseOrderedSources,
+            if (!baseOrderedSources.contains(_currentPendingSourceId))
+              _currentPendingSourceId!,
+          ]
+        : baseOrderedSources;
     final _ScrapeNode? activeNode =
         _currentPendingSourceId != null ? _nodes[_currentPendingSourceId] : null;
 
@@ -643,7 +741,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
                                 sourceName: node.name,
                                 status: st,
                                 subline: st == ScrapeStatus.pending
-                                    ? 'Checking for videos…'
+                                    ? 'Checking for videos...'
                                     : null,
                               );
                             },
@@ -651,7 +749,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
                         else
                           _IdleScrapeCard(
                             label: _isLoading
-                                ? 'Preparing provider list…'
+                                ? 'Preparing provider list...'
                                 : 'Waiting for the next step.',
                           ),
                       ],
@@ -708,6 +806,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
                                   _allFailure = false;
                                   _failureMessage = null;
                                   _isLoading = true;
+                                  _currentPendingSourceId = null;
                                   _statuses.clear();
                                   for (final String id in _sourceOrder) {
                                     _statuses[id] = ScrapeStatus.waiting;
@@ -728,7 +827,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
                                     }
                                   });
                                 }
-                                _startStreamScrape();
+                                unawaited(_startInitialScrapeSequence());
                               },
                               child: const Text('Try again'),
                             ),
@@ -736,9 +835,20 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
                         ],
                       ),
                       const SizedBox(height: AppSpacing.x2),
-                      TextButton(
-                        onPressed: _showManualPicker,
-                        child: const Text('Choose source manually'),
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        spacing: AppSpacing.x2,
+                        runSpacing: AppSpacing.x1,
+                        children: <Widget>[
+                          TextButton(
+                            onPressed: _showXprimePicker,
+                            child: const Text('Try XPrime fallback'),
+                          ),
+                          TextButton(
+                            onPressed: _showManualPicker,
+                            child: const Text('Choose source manually'),
+                          ),
+                        ],
                       ),
                     ],
                   ),

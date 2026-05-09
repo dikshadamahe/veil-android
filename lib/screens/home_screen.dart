@@ -662,7 +662,12 @@ String _friendlyMessage(Object error) {
     return 'TMDB_TOKEN is invalid or expired in this build. Rebuild the app with the new read access token.';
   }
   if (message.contains('TimeoutException')) {
-    return 'TMDB timed out on this network. The app now retries once, but if it still fails, rebuild with the new token and test again on a stable connection.';
+    return 'TMDB timed out on this network. Veil now retries automatically, but if it still fails, test again on a more stable connection.';
+  }
+  if (message.contains('SocketException') ||
+      message.contains('Connection reset by peer') ||
+      message.contains('ClientException')) {
+    return 'TMDB temporarily dropped the connection. Veil now retries automatically; if this still happens, wait a moment and reopen the feed.';
   }
   return message;
 }

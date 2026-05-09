@@ -13,16 +13,10 @@ class AppConfig {
 
   static bool get hasTmdbReadToken => tmdbReadToken.trim().isNotEmpty;
 
-  /// Comma-separated `@p-stream/providers` sourcerer **source** ids (see
-  /// `GET /sources` on your Oracle). Sent as `sourceOrder`.
-  /// Default matches a typical Oracle build (vidlink + FED + common mirrors).
-  /// New sites (2embed.cc, vidsrcme.su, CinePro, …) only apply after they exist
-  /// as ids in `/sources` — see `backend/providers-api/docs/CUSTOM_EMBED_INTEGRATION.md`.
-  /// Override with `--dart-define=SCRAPE_SOURCE_ORDER=` (empty) for library default order.
-  static String get scrapeSourceOrder => const String.fromEnvironment(
-    'SCRAPE_SOURCE_ORDER',
-    defaultValue: 'vidlink,fedapi,fedapidb,ridomovies,rgshows,vidrock',
-  );
+  /// Fixed backend source order for the current Oracle build.
+  /// Priority: Finger (XPrime) is tried first in scraping_screen.
+  /// Then: Vidlink and Granite (vidrock) both work on this VM.
+  static const String scrapeSourceOrder = 'vidlink,vidrock';
 
   static List<String>? get scrapeSourceOrderList {
     final List<String> ids = scrapeSourceOrder

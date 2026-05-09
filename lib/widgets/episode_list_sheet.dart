@@ -103,7 +103,8 @@ class _EpisodeListSheetState extends ConsumerState<EpisodeListSheet>
     final LatestEpisodeSelection? currentSelection = ref.watch(
       latestEpisodeSelectionProvider(widget.media),
     );
-    final List<Episode> episodes = seasonEpisodes.value ?? const <Episode>[];
+    final List<Episode> episodes =
+        seasonEpisodes.valueOrNull ?? const <Episode>[];
     final bool isLoading = seasonEpisodes.isLoading;
 
     return DraggableScrollableSheet(
