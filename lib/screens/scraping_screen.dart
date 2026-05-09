@@ -372,19 +372,19 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return <String>[];
     }
     final List<String> out = <String>[];
-    // Add XPrime sources first (already ordered with Finger first)
-    for (final String id in _sourceOrder) {
-      if (id.startsWith('xprime:') && !out.contains(id)) {
-        out.add(id);
-      }
-    }
-    // Then add backend sources in preferred order
+    // Add backend sources first (Vidlink, Granite) - they work well
     final List<String>? preferred = AppConfig.scrapeSourceOrderList;
     if (preferred != null) {
       for (final String id in preferred) {
         if (known.contains(id) && !out.contains(id)) {
           out.add(id);
         }
+      }
+    }
+    // Then add XPrime sources (Finger first, then others)
+    for (final String id in _sourceOrder) {
+      if (id.startsWith('xprime:') && !out.contains(id)) {
+        out.add(id);
       }
     }
     // Add any remaining sources
