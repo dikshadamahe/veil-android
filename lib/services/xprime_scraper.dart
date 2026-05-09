@@ -1020,8 +1020,17 @@ class XprimeScraper {
 
     for (final String url in urlsToTry) {
       try {
+        // HLS URLs from oca.lihala-n-tmurt.workers.dev need proper headers
+        final Map<String, String> headers = <String, String>{
+          'User-Agent': _xprimeUserAgent,
+          'Accept': '*/*',
+        };
+        if (url.contains('oca.lihala-n-tmurt.workers.dev')) {
+          headers['Referer'] = 'https://xprime.stream/';
+          headers['Origin'] = 'https://xprime.stream';
+        }
         final http.Response resp = await http
-            .get(Uri.parse(url))
+            .get(Uri.parse(url), headers: headers)
             .timeout(const Duration(seconds: 10));
         if (resp.statusCode >= 200 && resp.statusCode < 300) {
           playlistContent = resp.body;
@@ -1071,8 +1080,8 @@ class XprimeScraper {
         }
         pendingVariant = 'bandwidth=$bandwidth${height != null ? ',height=$height' : ''}';
       } else if (trimmed.isNotEmpty && !trimmed.startsWith('#') && pendingVariant != null) {
-        // This is the URL for the variant we just parsed
-        final String variantUrl = trimmed;
+        // This is the URL for the variant we just parsed - resolve relative URLs
+        final String variantUrl = _resolveRelativeUrl(m3u8Url, trimmed);
         final String qualityLabel = _labelFromHlsVariant(bandwidth, pendingVariant);
         result[qualityLabel] = StreamQuality(url: variantUrl, type: 'hls');
         pendingVariant = null;
@@ -1149,6 +1158,20 @@ class XprimeScraper {
       return '480p';
     }
     return '360p';
+  }
+
+  /// Resolves a relative URL against a base URL.
+  static String _resolveRelativeUrl(String baseUrl, String relativeUrl) {
+    if (relativeUrl.isEmpty) {
+      return baseUrl;
+    }
+    // Already absolute
+    if (relativeUrl.startsWith('http://') || relativeUrl.startsWith('https://')) {
+      return relativeUrl;
+    }
+    // Resolve relative URL against base
+    final Uri base = Uri.parse(baseUrl);
+    return base.resolve(relativeUrl).toString();
   }
 
   /// Infers quality label from URL patterns (for single-variant streams).

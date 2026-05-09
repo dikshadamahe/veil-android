@@ -14,6 +14,7 @@ class ExternalSubtitleService {
   const ExternalSubtitleService();
 
   static final Uri _wyzieSearch = Uri.parse('https://sub.wyzie.io/search');
+  static final Uri _vdrkSearch = Uri.parse('https://sub.vdrk.site/v1/movie');
   static final Uri _osBase = Uri.parse('https://api.opensubtitles.com/api/v1');
 
   static String? _osBearer;
@@ -63,6 +64,15 @@ class ExternalSubtitleService {
         out.addAll(results);
       }).catchError((Object e) {
         errors.add('Wyzie: $e');
+      }));
+    }
+
+    // VDRK subtitle search - works for movies only (no season/episode support)
+    if (!media.isShow) {
+      futures.add(_searchVdrk(media.tmdbId).then((List<ExternalSubtitleOffer> results) {
+        out.addAll(results);
+      }).catchError((Object e) {
+        errors.add('VDRK: $e');
       }));
     }
 
@@ -311,6 +321,71 @@ class ExternalSubtitleService {
           title: title,
           languageLabel: language,
           providerLabel: 'Wyzie · $source',
+          directUrl: url,
+        ),
+      );
+      index++;
+    }
+    return offers;
+  }
+
+  /// VDRK subtitle search - simple API: sub.vdrk.site/v1/movie/{tmdbId}
+  Future<List<ExternalSubtitleOffer>> _searchVdrk(String tmdbId) async {
+    final Uri uri = _vdrkSearch.replace(path: '${_vdrkSearch.path}/$tmdbId');
+
+    final http.Response response = await _getIdempotentWithRetry(
+      uri,
+      headers: <String, String>{
+        'Accept': 'application/json',
+        'User-Agent': AppConfig.subtitleHttpUserAgent,
+      },
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _httpFailureMessage(response);
+    }
+
+    final dynamic decoded = jsonDecode(response.body);
+    if (decoded is! List) {
+      // VDRK returns an object with subtitles array if single language
+      if (decoded is Map && decoded.containsKey('subtitles')) {
+        final dynamic subs = decoded['subtitles'];
+        if (subs is! List) {
+          return <ExternalSubtitleOffer>[];
+        }
+        return _parseVdrkSubtitles(subs);
+      }
+      throw Exception('unexpected response (not a JSON list)');
+    }
+
+    return _parseVdrkSubtitles(decoded);
+  }
+
+  List<ExternalSubtitleOffer> _parseVdrkSubtitles(List<dynamic> items) {
+    final List<ExternalSubtitleOffer> offers = <ExternalSubtitleOffer>[];
+    int index = 0;
+    for (final dynamic item in items) {
+      if (item is! Map) {
+        continue;
+      }
+      final Map<String, dynamic> row = Map<String, dynamic>.from(item);
+      final String? url = _parseNullableString(row['url'] ?? row['file']);
+      if (url == null || url.isEmpty) {
+        continue;
+      }
+      final String language =
+          _parseNullableString(row['language'] ?? row['lang'] ?? row['label']) ??
+          'Unknown';
+      final String title =
+          _parseNullableString(row['title'] ?? row['name'] ?? row['release']) ??
+          language;
+
+      offers.add(
+        ExternalSubtitleOffer(
+          id: 'vdrk-$index-$url',
+          title: title,
+          languageLabel: language,
+          providerLabel: 'VDRK',
           directUrl: url,
         ),
       );
