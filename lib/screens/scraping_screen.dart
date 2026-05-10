@@ -11,6 +11,8 @@ import 'package:pstream_android/models/stream_result.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/screens/player_screen.dart';
 import 'package:pstream_android/services/stream_service.dart';
+import 'package:pstream_android/services/vidsrc_scraper.dart';
+import 'package:pstream_android/services/vidlink_scraper.dart';
 import 'package:pstream_android/services/xprime_scraper.dart';
 import 'package:pstream_android/widgets/scrape_source_card.dart'
     show ScrapeSourceCard, ScrapeStatus, StatusCircle;
@@ -131,35 +133,51 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     return result.failureReason ?? 'No sources in /sources response.';
   }
 
-  /// Sequential source order: Vidsrc -> Granite (vidrock) -> Vidlink -> XPrime Finger
+  /// Frontend scrapers (WebView-based) - no backend needed
+  final VidsrcScraper _vidsrcScraper = const VidsrcScraper();
+  final VidlinkScraper _vidlinkScraper = const VidlinkScraper();
+
+  /// Sequential source order: Vidsrc (WebView) -> Vidlink (WebView) -> XPrime Finger
   static const List<String> _primarySourceOrder = <String>[
-    'vidsrc',    // vsembed.ru - direct
-    'vidrock',   // Granite
-    'vidlink',   // vidlink.pro - direct first
+    'vidsrc',    // vidsrcme.ru - WebView
+    'vidlink',   // vidlink.pro - WebView
   ];
 
   Future<void> _startInitialScrapeSequence() async {
     _ensurePrimaryXprimeNode();
     _setLoading(true);
 
-    // Try backend sources sequentially: Vidsrc -> Granite -> Vidlink
+    // Try frontend WebView scrapers first: Vidsrc -> Vidlink
     for (final String sourceId in _primarySourceOrder) {
-      debugPrint('[SCRAPE] Trying source: $sourceId');
+      debugPrint('[SCRAPE] Trying frontend source: $sourceId');
       _updateStatus(sourceId, ScrapeStatus.pending);
       _currentPendingSourceId = sourceId;
 
+      StreamResult? result;
+
       try {
-        debugPrint('[SCRAPE] Calling scrapeSingleSource for: $sourceId');
-        final StreamResult? result = await _streamService.scrapeSingleSource(
-          widget.mediaItem,
-          selectedId: sourceId,
-          selectedType: 'source',
-          season: widget.season,
-          episode: widget.episode,
-          seasonTmdbId: widget.seasonTmdbId,
-          episodeTmdbId: widget.episodeTmdbId,
-          seasonTitle: widget.seasonTitle,
-        );
+        if (sourceId == 'vidsrc') {
+          debugPrint('[SCRAPE] Calling VidsrcScraper');
+          result = await _vidsrcScraper.scrape(
+            context: context,
+            tmdbId: '${widget.mediaItem.tmdbId}',
+            title: widget.mediaItem.title,
+            year: widget.mediaItem.year,
+            season: widget.season,
+            episode: widget.episode,
+          );
+        } else if (sourceId == 'vidlink') {
+          debugPrint('[SCRAPE] Calling VidlinkScraper');
+          result = await _vidlinkScraper.scrape(
+            context: context,
+            tmdbId: '${widget.mediaItem.tmdbId}',
+            title: widget.mediaItem.title,
+            year: widget.mediaItem.year,
+            season: widget.season,
+            episode: widget.episode,
+          );
+        }
+
         debugPrint('[SCRAPE] Result for $sourceId: ${result != null ? "success" : "null"}');
 
         if (!mounted) {
@@ -189,7 +207,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return;
     }
 
-    // All backend sources failed, try XPrime Finger
+    // Frontend scrapers failed, try XPrime Finger
     const String fingerSourceId = 'xprime:finger';
     _updateStatus(fingerSourceId, ScrapeStatus.pending);
     _currentPendingSourceId = fingerSourceId;
