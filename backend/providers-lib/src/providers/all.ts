@@ -110,12 +110,12 @@ import { zunimeScraper } from './sources/zunime';
 
 export function gatherAllSources(): Array<Sourcerer> {
   // all sources are gathered here
-  // Priority order: Vidsrc -> Granite -> Vidlink -> others
+  // Priority order: Vidsrc -> Granite (vidrock) -> Vidlink -> others
   return [
     // Direct sources first (no backend needed)
     vidsrcScraper,    // vsembed.ru - direct
+    vidrockScraper,   // Granite (vidrock)
     vidlinkScraper,   // vidlink.pro - direct first
-    vidrockScraper,   // Granite
     // Then others...
     dopeboxScraper,
     cuevana3Scraper,
@@ -158,10 +158,8 @@ export function gatherAllSources(): Array<Sourcerer> {
     debridScraper,
     cinehdplusScraper,
     fullhdfilmizleScraper,
-    vidlinkScraper,
     vidsrcembedScraper,
     twoembedScraper,
-    vidrockScraper,
     watchanimeworldScraper,
   ];
 }

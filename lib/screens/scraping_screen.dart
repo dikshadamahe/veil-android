@@ -131,15 +131,63 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     return result.failureReason ?? 'No sources in /sources response.';
   }
 
+  /// Sequential source order: Vidsrc -> Granite (vidrock) -> Vidlink -> XPrime Finger
+  static const List<String> _primarySourceOrder = <String>[
+    'vidsrc',    // vsembed.ru - direct
+    'vidrock',   // Granite
+    'vidlink',   // vidlink.pro - direct first
+  ];
+
   Future<void> _startInitialScrapeSequence() async {
     _ensurePrimaryXprimeNode();
-    // Start with Finger (first XPrime source)
-    const String fingerSourceId = 'xprime:finger';
-    _updateStatus(fingerSourceId, ScrapeStatus.pending);
     _setLoading(true);
 
+    // Try backend sources sequentially: Vidsrc -> Granite -> Vidlink
+    for (final String sourceId in _primarySourceOrder) {
+      _updateStatus(sourceId, ScrapeStatus.pending);
+      _currentPendingSourceId = sourceId;
+
+      try {
+        final StreamResult? result = await _streamService.scrapeSingleSource(
+          widget.mediaItem,
+          selectedId: sourceId,
+          selectedType: 'source',
+          season: widget.season,
+          episode: widget.episode,
+          seasonTmdbId: widget.seasonTmdbId,
+          episodeTmdbId: widget.episodeTmdbId,
+          seasonTitle: widget.seasonTitle,
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        if (result != null) {
+          _updateStatus(sourceId, ScrapeStatus.success);
+          _navigateToPlayer(result);
+          return;
+        }
+
+        _updateStatus(sourceId, ScrapeStatus.notfound);
+      } catch (_) {
+        if (!mounted) {
+          return;
+        }
+        _updateStatus(sourceId, ScrapeStatus.failure);
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    // All backend sources failed, try XPrime Finger
+    const String fingerSourceId = 'xprime:finger';
+    _updateStatus(fingerSourceId, ScrapeStatus.pending);
+    _currentPendingSourceId = fingerSourceId;
+
     try {
-      // Scrape with Finger provider specifically
       final StreamResult? xprimeResult = await _xprimeScraper.scrape(
         context: context,
         tmdbId: '${widget.mediaItem.tmdbId}',
@@ -172,6 +220,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return;
     }
 
+    // All primary sources failed, start stream scrape for remaining sources
     _currentPendingSourceId = null;
     _startStreamScrape();
   }
