@@ -422,7 +422,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return <String>[];
     }
     final List<String> out = <String>[];
-    // Add backend sources first (Vidlink, Granite) - they work well
+    // Add backend sources first (Vidsrc, Granite, Vidlink)
     final List<String>? preferred = AppConfig.scrapeSourceOrderList;
     if (preferred != null) {
       for (final String id in preferred) {
