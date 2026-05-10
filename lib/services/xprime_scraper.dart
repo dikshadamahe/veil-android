@@ -124,7 +124,7 @@ class XprimeScraper {
       final List<String> cookieSources = <String>{
         playbackUrl,
         if (currentPageUrl != null) currentPageUrl!,
-        'https://xprime.stream/',
+        'https://xprime.su/',
         'https://mznxiwqjdiq00239q.space/',
       }.toList(growable: false);
 
@@ -575,7 +575,7 @@ class XprimeScraper {
                       msg.contains('turnstile') ||
                       msg.contains('backend.xprime.tv') ||
                       msg.contains('mznxiwqjdiq00239q.space') ||
-                      msg.contains('db.xprime.stream')) {
+                      msg.contains('db.xprime.su')) {
                     _log('console ${consoleMessage.messageLevel}: $msg');
                   }
                 },
@@ -674,9 +674,9 @@ class XprimeScraper {
 
   static String _watchUrl(String tmdbId, int? season, int? episode) {
     if (season != null && episode != null) {
-      return 'https://xprime.stream/watch/$tmdbId/$season/$episode';
+      return 'https://xprime.su/watch/$tmdbId/$season/$episode';
     }
-    return 'https://xprime.stream/watch/$tmdbId';
+    return 'https://xprime.su/watch/$tmdbId';
   }
 
   static bool _isInterestingXprimeUrl(String? rawUrl) {
@@ -686,12 +686,12 @@ class XprimeScraper {
     final Uri? uri = Uri.tryParse(rawUrl);
     final String host = (uri?.host ?? '').toLowerCase();
     return host == 'backend.xprime.tv' ||
-        host == 'db.xprime.stream' ||
+        host == 'db.xprime.su' ||
         host == 'mznxiwqjdiq00239q.space' ||
         host == 'oca.lihala-n-tmurt.workers.dev' ||
-        host.endsWith('.xprime.stream') ||
+        host.endsWith('.xprime.su') ||
         host.endsWith('.website') ||
-        host == 'xprime.stream';
+        host == 'xprime.su';
   }
 
   static bool _isFinalPlaybackWorkerUrl(String? rawUrl) {
@@ -1030,8 +1030,8 @@ class XprimeScraper {
           'Accept': '*/*',
         };
         if (url.contains('oca.lihala-n-tmurt.workers.dev')) {
-          headers['Referer'] = 'https://xprime.stream/';
-          headers['Origin'] = 'https://xprime.stream';
+          headers['Referer'] = 'https://xprime.su/';
+          headers['Origin'] = 'https://xprime.su';
         }
         final http.Response resp = await http
             .get(Uri.parse(url), headers: headers)
