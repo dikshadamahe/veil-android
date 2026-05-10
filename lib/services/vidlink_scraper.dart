@@ -79,14 +79,12 @@ class VidlinkScraper {
         ),
       ),
     );
-    Overlay.of(context).insert(overlayEntry!);
+    Overlay.of(context).insert(overlayEntry);
 
     final url = _watchUrl(tmdbId, season, episode);
     debugPrint('[Vidlink] Loading URL: $url');
 
-    InAppWebView? webView;
-
-    webView = InAppWebView(
+    InAppWebView(
       initialUrlRequest: URLRequest(
         url: WebUri(url),
       ),

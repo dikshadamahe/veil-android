@@ -80,14 +80,12 @@ class VidsrcScraper {
         ),
       ),
     );
-    Overlay.of(context).insert(overlayEntry!);
+    Overlay.of(context).insert(overlayEntry);
 
     final url = _embedUrl(tmdbId, season, episode);
     debugPrint('[Vidsrc] Loading URL: $url');
 
-    InAppWebView? webView;
-
-    webView = InAppWebView(
+    InAppWebView(
       initialUrlRequest: URLRequest(
         url: WebUri(url),
       ),
