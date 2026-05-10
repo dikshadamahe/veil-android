@@ -23,7 +23,6 @@ class VidsrcScraper {
       '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
   static String _embedUrl(String tmdbId, int? season, int? episode) {
-    // Using vidsrcme.ru - direct embed
     if (season != null && episode != null) {
       return 'https://vidsrcme.ru/embed/tv?tmdb=$tmdbId&season=$season&episode=$episode';
     }
@@ -54,6 +53,10 @@ class VidsrcScraper {
     final Completer<StreamResult?> completer = Completer<StreamResult?>();
     String? foundStreamUrl;
     OverlayEntry? overlayEntry;
+    InAppWebViewController? controller;
+
+    final url = _embedUrl(tmdbId, season, episode);
+    debugPrint('[Vidsrc] Loading URL: $url');
 
     overlayEntry = OverlayEntry(
       builder: (BuildContext context) => Positioned(
@@ -82,93 +85,90 @@ class VidsrcScraper {
     );
     Overlay.of(context).insert(overlayEntry);
 
-    final url = _embedUrl(tmdbId, season, episode);
-    debugPrint('[Vidsrc] Loading URL: $url');
+    // Wait for the WebView to load and capture stream
+    await Future<void>.delayed(const Duration(seconds: 25));
 
-    InAppWebView(
-      initialUrlRequest: URLRequest(
-        url: WebUri(url),
-      ),
+    // Try to get stream URL from WebView if we have controller
+    if (controller != null && foundStreamUrl == null) {
+      try {
+        final String? html = await controller.evaluateJavascript(
+          source: 'document.documentElement.outerHTML',
+        );
+        if (html != null && html.contains('data-config')) {
+          final startIdx = html.indexOf('data-config=');
+          if (startIdx >= 0) {
+            final substring = html.substring(startIdx, startIdx + 200);
+            final firstQuote = substring.indexOf('"');
+            final secondQuote = substring.indexOf('"', firstQuote + 1);
+            if (firstQuote >= 0 && secondQuote > firstQuote) {
+              foundStreamUrl = substring.substring(firstQuote + 1, secondQuote);
+              debugPrint('[Vidsrc] found data-config: $foundStreamUrl');
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[Vidsrc] eval error: $e');
+      }
+    }
+
+    overlayEntry.remove();
+    debugPrint('[Vidsrc] done, found: $foundStreamUrl');
+
+    if (foundStreamUrl != null) {
+      return StreamResult(
+        sourceId: 'vidsrc',
+        sourceName: 'Vidsrc',
+        embedId: null,
+        embedName: null,
+        stream: StreamPlayback(
+          id: 'vidsrc-primary',
+          type: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'file',
+          playlist: foundStreamUrl!.contains('.m3u8') ? foundStreamUrl : null,
+          proxiedPlaylist: null,
+          playbackUrl: foundStreamUrl,
+          playbackType: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'mp4',
+          selectedQuality: null,
+          qualities: {},
+          headers: {'User-Agent': _userAgent},
+          preferredHeaders: {},
+          captions: const [],
+          flags: const [],
+        ),
+      );
+    }
+
+    return null;
+  }
+
+  // Static method to be called with context to show WebView
+  static Widget buildWebView({
+    required String tmdbId,
+    int? season,
+    int? episode,
+    required Function(String) onStreamFound,
+  }) {
+    final url = _embedUrl(tmdbId, season, episode);
+    return InAppWebView(
+      initialUrlRequest: URLRequest(url: WebUri(url)),
       initialSettings: InAppWebViewSettings(
-        useShouldOverrideUrlLoading: true,
+        javaScriptEnabled: true,
         mediaPlaybackRequiresUserGesture: false,
         allowsInlineMediaPlayback: true,
         userAgent: _userAgent,
       ),
+      onWebViewCreated: (InAppWebViewController ctrl) {},
       shouldOverrideUrlLoading: (controller, navigationAction) async {
-        final String? urlStr = navigationAction.request.url?.toString();
-        debugPrint('[Vidsrc] shouldOverrideUrlLoading: $urlStr');
-        if (_isStreamUrl(urlStr) && foundStreamUrl == null) {
-          foundStreamUrl = urlStr;
+        final urlStr = navigationAction.request.url?.toString();
+        if (_isStreamUrl(urlStr)) {
+          debugPrint('[Vidsrc] shouldOverrideUrlLoading: $urlStr');
+          onStreamFound(urlStr);
         }
         return NavigationActionPolicy.ALLOW;
       },
-      onLoadStart: (controller, uri) async {
-        final String? urlStr = uri?.toString();
-        debugPrint('[Vidsrc] loadStart: $urlStr');
-        if (_isStreamUrl(urlStr) && foundStreamUrl == null) {
-          foundStreamUrl = urlStr;
-        }
-      },
-      onProgressChanged: (controller, progress) async {
-        if (progress == 100 && foundStreamUrl == null) {
-          try {
-            final String? html = await controller.evaluateJavascript(
-              source: 'document.documentElement.outerHTML',
-            );
-            if (html != null) {
-              // Look for data-config attribute
-              if (html.contains('data-config')) {
-                final startIdx = html.indexOf('data-config=');
-                if (startIdx >= 0) {
-                  final substring = html.substring(startIdx, startIdx + 200);
-                  // Find the value between quotes
-                  final firstQuote = substring.indexOf('"');
-                  final secondQuote = substring.indexOf('"', firstQuote + 1);
-                  if (firstQuote >= 0 && secondQuote > firstQuote) {
-                    foundStreamUrl = substring.substring(firstQuote + 1, secondQuote);
-                    debugPrint('[Vidsrc] found data-config: $foundStreamUrl');
-                  }
-                }
-              }
-            }
-          } catch (_) {}
-        }
+      onLoadStop: (controller, url) async {
+        final urlStr = url?.toString();
+        debugPrint('[Vidsrc] loadStop: $urlStr');
       },
     );
-
-    // Wait for stream or timeout
-    Future<void>.delayed(const Duration(seconds: 20), () async {
-      overlayEntry?.remove();
-      if (!completer.isCompleted) {
-        debugPrint('[Vidsrc] timeout reached, found: $foundStreamUrl');
-        if (foundStreamUrl != null) {
-          completer.complete(StreamResult(
-            sourceId: 'vidsrc',
-            sourceName: 'Vidsrc',
-            embedId: null,
-            embedName: null,
-            stream: StreamPlayback(
-              id: 'vidsrc-primary',
-              type: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'file',
-              playlist: foundStreamUrl!.contains('.m3u8') ? foundStreamUrl : null,
-              proxiedPlaylist: null,
-              playbackUrl: foundStreamUrl,
-              playbackType: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'mp4',
-              selectedQuality: null,
-              qualities: {},
-              headers: {'User-Agent': _userAgent},
-              preferredHeaders: {},
-              captions: const [],
-              flags: const [],
-            ),
-          ));
-        } else {
-          completer.complete(null);
-        }
-      }
-    });
-
-    return completer.future;
   }
 }

@@ -53,6 +53,10 @@ class VidlinkScraper {
     final Completer<StreamResult?> completer = Completer<StreamResult?>();
     String? foundStreamUrl;
     OverlayEntry? overlayEntry;
+    InAppWebViewController? controller;
+
+    final url = _watchUrl(tmdbId, season, episode);
+    debugPrint('[Vidlink] Loading URL: $url');
 
     overlayEntry = OverlayEntry(
       builder: (BuildContext context) => Positioned(
@@ -81,98 +85,66 @@ class VidlinkScraper {
     );
     Overlay.of(context).insert(overlayEntry);
 
-    final url = _watchUrl(tmdbId, season, episode);
-    debugPrint('[Vidlink] Loading URL: $url');
+    // Wait for the WebView to load
+    await Future<void>.delayed(const Duration(seconds: 25));
 
-    InAppWebView(
-      initialUrlRequest: URLRequest(
-        url: WebUri(url),
-      ),
-      initialSettings: InAppWebViewSettings(
-        useShouldOverrideUrlLoading: true,
-        mediaPlaybackRequiresUserGesture: false,
-        allowsInlineMediaPlayback: true,
-        userAgent: _userAgent,
-      ),
-      shouldOverrideUrlLoading: (controller, navigationAction) async {
-        final String? urlStr = navigationAction.request.url?.toString();
-        debugPrint('[Vidlink] shouldOverrideUrlLoading: $urlStr');
-        if (_isStreamUrl(urlStr) && foundStreamUrl == null) {
-          foundStreamUrl = urlStr;
-        }
-        return NavigationActionPolicy.ALLOW;
-      },
-      onLoadStart: (controller, uri) async {
-        final String? urlStr = uri?.toString();
-        debugPrint('[Vidlink] loadStart: $urlStr');
-        if (_isStreamUrl(urlStr) && foundStreamUrl == null) {
-          foundStreamUrl = urlStr;
-        }
-      },
-      onProgressChanged: (controller, progress) async {
-        if (progress == 100 && foundStreamUrl == null) {
-          try {
-            final String? html = await controller.evaluateJavascript(
-              source: 'document.documentElement.outerHTML',
-            );
-            if (html != null) {
-              // Look for iframe src
-              final srcStart = html.indexOf('<iframe');
-              if (srcStart >= 0) {
-                final srcSubstr = html.substring(srcStart, srcStart + 300);
-                // Find src="..." value
-                final srcIdx = srcSubstr.indexOf('src=');
-                if (srcIdx >= 0) {
-                  final afterSrc = srcSubstr.substring(srcIdx + 4);
-                  final firstQuote = afterSrc.indexOf('"');
-                  final secondQuote = afterSrc.indexOf('"', firstQuote + 1);
-                  if (firstQuote >= 0 && secondQuote > firstQuote) {
-                    final src = afterSrc.substring(firstQuote + 1, secondQuote);
-                    if (_isStreamUrl(src)) {
-                      foundStreamUrl = src;
-                      debugPrint('[Vidlink] found src: $foundStreamUrl');
-                    }
-                  }
+    // Try to extract stream from page
+    if (controller != null && foundStreamUrl == null) {
+      try {
+        final String? html = await controller.evaluateJavascript(
+          source: 'document.documentElement.outerHTML',
+        );
+        if (html != null) {
+          // Look for iframe src
+          final srcStart = html.indexOf('<iframe');
+          if (srcStart >= 0) {
+            final srcSubstr = html.substring(srcStart, srcStart + 300);
+            final srcIdx = srcSubstr.indexOf('src=');
+            if (srcIdx >= 0) {
+              final afterSrc = srcSubstr.substring(srcIdx + 4);
+              final firstQuote = afterSrc.indexOf('"');
+              final secondQuote = afterSrc.indexOf('"', firstQuote + 1);
+              if (firstQuote >= 0 && secondQuote > firstQuote) {
+                final src = afterSrc.substring(firstQuote + 1, secondQuote);
+                if (_isStreamUrl(src)) {
+                  foundStreamUrl = src;
+                  debugPrint('[Vidlink] found src: $foundStreamUrl');
                 }
               }
             }
-          } catch (_) {}
+          }
         }
-      },
-    );
-
-    // Wait for stream or timeout
-    Future<void>.delayed(const Duration(seconds: 20), () async {
-      overlayEntry?.remove();
-      if (!completer.isCompleted) {
-        debugPrint('[Vidlink] timeout reached, found: $foundStreamUrl');
-        if (foundStreamUrl != null) {
-          completer.complete(StreamResult(
-            sourceId: 'vidlink',
-            sourceName: 'VidLink',
-            embedId: null,
-            embedName: null,
-            stream: StreamPlayback(
-              id: 'vidlink-primary',
-              type: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'file',
-              playlist: foundStreamUrl!.contains('.m3u8') ? foundStreamUrl : null,
-              proxiedPlaylist: null,
-              playbackUrl: foundStreamUrl,
-              playbackType: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'mp4',
-              selectedQuality: null,
-              qualities: {},
-              headers: {'User-Agent': _userAgent},
-              preferredHeaders: {},
-              captions: const [],
-              flags: const [],
-            ),
-          ));
-        } else {
-          completer.complete(null);
-        }
+      } catch (e) {
+        debugPrint('[Vidlink] eval error: $e');
       }
-    });
+    }
 
-    return completer.future;
+    overlayEntry.remove();
+    debugPrint('[Vidlink] done, found: $foundStreamUrl');
+
+    if (foundStreamUrl != null) {
+      return StreamResult(
+        sourceId: 'vidlink',
+        sourceName: 'VidLink',
+        embedId: null,
+        embedName: null,
+        stream: StreamPlayback(
+          id: 'vidlink-primary',
+          type: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'file',
+          playlist: foundStreamUrl!.contains('.m3u8') ? foundStreamUrl : null,
+          proxiedPlaylist: null,
+          playbackUrl: foundStreamUrl,
+          playbackType: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'mp4',
+          selectedQuality: null,
+          qualities: {},
+          headers: {'User-Agent': _userAgent},
+          preferredHeaders: {},
+          captions: const [],
+          flags: const [],
+        ),
+      );
+    }
+
+    return null;
   }
 }
