@@ -95,6 +95,7 @@ import { slidemoviesScraper } from './sources/slidemovies';
 import { soaperTvScraper } from './sources/soapertv';
 import { streamboxScraper } from './sources/streambox';
 import { turbovidSourceScraper } from './sources/turbovid';
+import { vidsrcScraper } from './sources/vidsrc';
 import { vidapiClickScraper } from './sources/vidapiclick';
 import { vidifyScraper } from './sources/vidify';
 import { twoembedScraper } from './sources/twoembed';
@@ -109,8 +110,13 @@ import { zunimeScraper } from './sources/zunime';
 
 export function gatherAllSources(): Array<Sourcerer> {
   // all sources are gathered here
+  // Priority order: Vidsrc -> Granite -> Vidlink -> others
   return [
-    fsOnlineScraper,
+    // Direct sources first (no backend needed)
+    vidsrcScraper,    // vsembed.ru - direct
+    vidlinkScraper,   // vidlink.pro - direct first
+    vidrockScraper,   // Granite
+    // Then others...
     dopeboxScraper,
     cuevana3Scraper,
     ridooMoviesScraper,
