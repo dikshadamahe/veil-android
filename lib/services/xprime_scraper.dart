@@ -251,10 +251,12 @@ class XprimeScraper {
 
       // Fetch HLS master playlist variants for all m3u8 URLs - the HLS master
       // contains all available quality variants, not just what the API reports
+      // Also check for oca.lihala-n-tmurt.workers.dev which returns HLS playlists
       final String? playlistUrl = result.stream.playlist?.trim();
       final bool needsHlsParsing = playlistUrl != null &&
           playlistUrl.isNotEmpty &&
-          playlistUrl.toLowerCase().endsWith('.m3u8');
+          (playlistUrl.toLowerCase().endsWith('.m3u8') ||
+              playlistUrl.contains('oca.lihala-n-tmurt.workers.dev'));
 
       if (needsHlsParsing) {
         _log('fetching HLS playlist: $playlistUrl');
