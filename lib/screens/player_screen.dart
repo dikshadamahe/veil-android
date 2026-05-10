@@ -1236,10 +1236,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                 source.supportsMediaType(_scrapeMediaType),
                           )
                           .toList();
+                  // Priority order: Vidsrc -> Granite (vidrock) -> Vidlink -> XPrime -> others
+                  final List<String> sourcePriority = <String>[
+                    'vidsrc',
+                    'vidrock',
+                    'vidlink',
+                  ];
+                  final List<ScrapeSourceDefinition> sortedBackendSources =
+                      List<ScrapeSourceDefinition>.from(backendSources);
+                  sortedBackendSources.sort((ScrapeSourceDefinition a, ScrapeSourceDefinition b) {
+                    final int indexA = sourcePriority.indexOf(a.id);
+                    final int indexB = sourcePriority.indexOf(b.id);
+                    final int priorityA = indexA >= 0 ? indexA : 999;
+                    final int priorityB = indexB >= 0 ? indexB : 999;
+                    if (priorityA != priorityB) {
+                      return priorityA.compareTo(priorityB);
+                    }
+                    return a.name.compareTo(b.name);
+                  });
                   final List<ScrapeSourceDefinition> sources =
                       <ScrapeSourceDefinition>[
+                    ...sortedBackendSources,
                     ...XprimeScraper.sourceDefinitions,
-                    ...backendSources,
                   ];
 
                   return _PlayerOptionSheet(

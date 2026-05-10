@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/models/media_item.dart';
@@ -410,6 +411,7 @@ class StreamService {
       parentSourceId: parentSourceId,
     );
     try {
+      debugPrint('[STREAM_SERVICE] scrapeBlockingRequest URI: $scrapeUri');
       final http.Response response = await client
           .get(
             scrapeUri,
@@ -417,6 +419,7 @@ class StreamService {
           )
           .timeout(const Duration(seconds: 90));
 
+      debugPrint('[STREAM_SERVICE] Response status: ${response.statusCode}');
       if (response.statusCode == 404) {
         return null;
       }

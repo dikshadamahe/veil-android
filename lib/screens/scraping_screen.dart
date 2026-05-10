@@ -144,10 +144,12 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
     // Try backend sources sequentially: Vidsrc -> Granite -> Vidlink
     for (final String sourceId in _primarySourceOrder) {
+      debugPrint('[SCRAPE] Trying source: $sourceId');
       _updateStatus(sourceId, ScrapeStatus.pending);
       _currentPendingSourceId = sourceId;
 
       try {
+        debugPrint('[SCRAPE] Calling scrapeSingleSource for: $sourceId');
         final StreamResult? result = await _streamService.scrapeSingleSource(
           widget.mediaItem,
           selectedId: sourceId,
@@ -158,19 +160,24 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
           episodeTmdbId: widget.episodeTmdbId,
           seasonTitle: widget.seasonTitle,
         );
+        debugPrint('[SCRAPE] Result for $sourceId: ${result != null ? "success" : "null"}');
 
         if (!mounted) {
           return;
         }
 
         if (result != null) {
+          debugPrint('[SCRAPE] SUCCESS - using source: $sourceId');
           _updateStatus(sourceId, ScrapeStatus.success);
           _navigateToPlayer(result);
           return;
         }
 
+        debugPrint('[SCRAPE] $sourceId returned null, marking notfound');
         _updateStatus(sourceId, ScrapeStatus.notfound);
-      } catch (_) {
+      } catch (e, st) {
+        debugPrint('[SCRAPE] ERROR on $sourceId: $e');
+        debugPrint('[SCRAPE] Stack: $st');
         if (!mounted) {
           return;
         }
