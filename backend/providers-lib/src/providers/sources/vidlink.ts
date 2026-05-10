@@ -4,6 +4,8 @@ import { NotFoundError } from '@/utils/errors';
 
 const API_BASE = 'https://enc-dec.app/api';
 const VIDLINK_BASE = 'https://vidlink.pro/api/b';
+// Direct endpoints (no encryption needed)
+const VIDLINK_DIRECT = 'https://vidlink.pro';
 
 const headers = {
   'User-Agent':
@@ -31,35 +33,67 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
 
   ctx.progress(10);
 
-  const encryptedId = await encryptTmdbId(ctx, tmdbId.toString());
+  // Try direct endpoint first (simpler, no encryption needed)
+  let vidlinkData: { stream?: any };
+  let useDirect = false;
 
-  ctx.progress(30);
+  try {
+    const directUrl =
+      ctx.media.type === 'movie'
+        ? `${VIDLINK_DIRECT}/movie/${tmdbId}`
+        : `${VIDLINK_DIRECT}/tv/${tmdbId}/s/${ctx.media.season.number}/e/${ctx.media.episode.number}`;
 
-  const apiUrl =
-    ctx.media.type === 'movie'
-      ? `${VIDLINK_BASE}/movie/${encryptedId}`
-      : `${VIDLINK_BASE}/tv/${encryptedId}/${ctx.media.season.number}/${ctx.media.episode.number}`;
+    ctx.progress(20);
 
-  const vidlinkRaw = await ctx.proxiedFetcher<string>(apiUrl, {
-    headers,
-  });
+    const directRaw = await ctx.proxiedFetcher<string>(directUrl, {
+      headers,
+    });
 
-  if (!vidlinkRaw) {
-    throw new NotFoundError('No response from vidlink API');
+    if (directRaw) {
+      try {
+        vidlinkData = typeof directRaw === 'string' ? JSON.parse(directRaw) : directRaw;
+        if (vidlinkData?.stream) {
+          useDirect = true;
+        }
+      } catch {
+        // Fall through to encrypted approach
+      }
+    }
+  } catch {
+    // Direct failed, try encrypted
   }
 
-  ctx.progress(60);
+  // If direct didn't work, try encrypted approach
+  if (!useDirect) {
+    ctx.progress(10);
+    const encryptedId = await encryptTmdbId(ctx, tmdbId.toString());
+    ctx.progress(30);
 
-  let vidlinkData: { stream?: any };
-  try {
-    vidlinkData = typeof vidlinkRaw === 'string' ? JSON.parse(vidlinkRaw) : vidlinkRaw;
-  } catch {
-    throw new NotFoundError('Invalid JSON from vidlink API');
+    const apiUrl =
+      ctx.media.type === 'movie'
+        ? `${VIDLINK_BASE}/movie/${encryptedId}`
+        : `${VIDLINK_BASE}/tv/${encryptedId}/${ctx.media.season.number}/${ctx.media.episode.number}`;
+
+    const vidlinkRaw = await ctx.proxiedFetcher<string>(apiUrl, {
+      headers,
+    });
+
+    if (!vidlinkRaw) {
+      throw new NotFoundError('No response from vidlink API');
+    }
+
+    ctx.progress(60);
+
+    try {
+      vidlinkData = typeof vidlinkRaw === 'string' ? JSON.parse(vidlinkRaw) : vidlinkRaw;
+    } catch {
+      throw new NotFoundError('Invalid JSON from vidlink API');
+    }
   }
 
   ctx.progress(80);
 
-  if (!vidlinkData.stream) {
+  if (!vidlinkData?.stream) {
     throw new NotFoundError('No stream data found in vidlink response');
   }
 
@@ -78,11 +112,6 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
       });
     }
   }
-
-  // const flags = stream.flags || [];
-  // if (vidlinkData.flags) {
-  //   flags.push(...vidlinkData.flags);
-  // }
 
   ctx.progress(90);
 
