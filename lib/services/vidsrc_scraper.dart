@@ -70,7 +70,6 @@ class VidsrcScraper {
   }) async {
     debugPrint('[Vidsrc] scrape start tmdbId=$tmdbId season=$season episode=$episode');
 
-    final Completer<StreamResult?> completer = Completer<StreamResult?>();
     String? foundStreamUrl;
     OverlayEntry? overlayEntry;
     InAppWebViewController? controller;
@@ -110,7 +109,7 @@ class VidsrcScraper {
     int attempts = 0;
     bool ready = false;
 
-    while (attempts < maxAttempts && !ready && mounted) {
+    while (attempts < maxAttempts && !ready && context.mounted) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
       attempts++;
 
@@ -179,28 +178,25 @@ class VidsrcScraper {
           } else {
             // Try to extract from potential config or data attributes
             final String? configData = await controller.evaluateJavascript(
-              source: '''(() => {
-                  // Look for common config patterns
-                  const scripts = document.querySelectorAll('script');
-                  for (let script of scripts) {
-                    if (script.textContent) {
-                      const text = script.textContent;
-                      // Look for common patterns in Vidsrc players
-                      if (text.includes('src:') || text.includes('file:') || text.includes('videoUrl')) {
-                        // Try to extract URL-like strings
-                        const urlMatches = text.match(/https?:\/\/[^\s"']+/g);
-                        if (urlMatches) {
-                          for (const url of urlMatches) {
-                            if (url.includes('.m3u8') || url.includes('.mp4')) {
-                              return url;
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                  return null;
-              })()''',
+              source: "(() => {\n"
+                  "  const scripts = document.querySelectorAll('script');\n"
+                  "  for (let script of scripts) {\n"
+                  "    if (script.textContent) {\n"
+                  "      const text = script.textContent;\n"
+                  "      if (text.includes('src:') || text.includes('file:') || text.includes('videoUrl')) {\n"
+                  "        const urlMatches = text.match(/https?:\\/\\/[^\\s\"']+/g);\n"
+                  "        if (urlMatches) {\n"
+                  "          for (const url of urlMatches) {\n"
+                  "            if (url.includes('.m3u8') || url.includes('.mp4')) {\n"
+                  "              return url;\n"
+                  "            }\n"
+                  "          }\n"
+                  "        }\n"
+                  "      }\n"
+                  "    }\n"
+                  "  }\n"
+                  "  return null;\n"
+                  "})()",
             );
 
             if (configData != null && configData.isNotEmpty && _isStreamUrl(configData)) {
@@ -262,7 +258,7 @@ class VidsrcScraper {
       onWebViewCreated: (InAppWebViewController ctrl) {},
       shouldOverrideUrlLoading: (controller, navigationAction) async {
         final urlStr = navigationAction.request.url?.toString();
-        if (_isStreamUrl(urlStr)) {
+        if (_isStreamUrl(urlStr) && urlStr != null) {
           debugPrint('[Vidsrc] shouldOverrideUrlLoading: $urlStr');
           onStreamFound(urlStr);
         }

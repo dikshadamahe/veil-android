@@ -50,7 +50,6 @@ class VidlinkScraper {
   }) async {
     debugPrint('[Vidlink] scrape start tmdbId=$tmdbId season=$season episode=$episode');
 
-    final Completer<StreamResult?> completer = Completer<StreamResult?>();
     String? foundStreamUrl;
     OverlayEntry? overlayEntry;
     InAppWebViewController? controller;
@@ -90,7 +89,7 @@ class VidlinkScraper {
     int attempts = 0;
     bool iframeFound = false;
 
-    while (attempts < maxAttempts && !iframeFound && mounted) {
+    while (attempts < maxAttempts && !iframeFound && context.mounted) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
       attempts++;
 
