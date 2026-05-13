@@ -24,59 +24,87 @@ async function comboScraper(ctx: MovieScrapeContext | ShowScrapeContext): Promis
 
   ctx.progress(30);
 
-  const response = await ctx.proxiedFetcher<any>(embedUrl, {
+  // vsembed returns HTML, not JSON - fetch directly without using proxiedFetcher for HTML parsing
+  const fetchResult = await ctx.fetcher(embedUrl, {
+    method: 'GET',
     headers,
   });
 
   ctx.progress(60);
 
-  if (!response) {
+  if (!fetchResult) {
     throw new NotFoundError('No response from vidsrc');
   }
 
-  // Extract stream data from vsembed response
-  // vsembed returns an iframe with src or direct stream links
   let playlist: string | undefined;
   let streamUrl: string | undefined;
   let qualities: Record<string, string> = {};
 
-  if (response.success && response.data) {
-    const data = response.data;
-    // Check for embed URL
+  // Handle string response (HTML)
+  if (typeof fetchResult === 'string') {
+    const html = fetchResult;
+
+    // Check for embed URL in data-config attribute
+    const configMatch = html.match(/data-config=["']([^"']+)["']/);
+    if (configMatch) {
+      try {
+        const configUrl = decodeURIComponent(configMatch[1]);
+        // Try to extract stream URL from config
+        if (configUrl.includes('.m3u8') || configUrl.includes('.mp4')) {
+          streamUrl = configUrl;
+        } else {
+          // Try fetching the config URL as JSON
+          const configResponse = await ctx.fetcher(configUrl, { headers });
+          if (configResponse && typeof configResponse === 'object') {
+            const config = configResponse as any;
+            if (config.file) {
+              streamUrl = config.file;
+            }
+            if (config.playlist) {
+              playlist = config.playlist;
+            }
+          }
+        }
+      } catch (_) {
+        // Ignore config parsing errors
+      }
+    }
+
+    // Check for iframe with stream URL
+    if (!streamUrl && !playlist) {
+      const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+      if (iframeMatch) {
+        streamUrl = iframeMatch[1];
+      }
+    }
+
+    // Check for video file URLs directly in HTML
+    if (!streamUrl && !playlist) {
+      const videoMatch = html.match(/file:\s*["']([^"']+\.(m3u8|mp4)[^"']*)["']/i);
+      if (videoMatch) {
+        streamUrl = videoMatch[1];
+      }
+    }
+  }
+
+  // Handle JSON response (if vsembed returns JSON in some cases)
+  if (!playlist && !streamUrl && typeof fetchResult === 'object') {
+    const data = fetchResult as any;
     if (data.embedUrl) {
       streamUrl = data.embedUrl;
     }
-    // Check for playlist
     if (data.playlist || data.streamUrl) {
       playlist = data.playlist || data.streamUrl;
     }
-    // Check for qualities
     if (data.qualities) {
       qualities = data.qualities;
     }
-    // Check for video links (multiple quality options)
     if (data.videoLinks && Array.isArray(data.videoLinks)) {
       for (const link of data.videoLinks) {
         if (link.url && link.quality) {
           qualities[link.quality] = link.url;
         }
       }
-    }
-  }
-
-  // If no data, check for simple stream URL in response
-  if (!playlist && !streamUrl && typeof response === 'string') {
-    // Check if response is a direct stream URL
-    if (response.includes('.m3u8') || response.includes('.mp4')) {
-      streamUrl = response;
-    }
-  }
-
-  // Check for iframe src in HTML response
-  if (!playlist && !streamUrl && response.html) {
-    const iframeMatch = response.html.match(/src="([^"]+)"/);
-    if (iframeMatch) {
-      streamUrl = iframeMatch[1];
     }
   }
 

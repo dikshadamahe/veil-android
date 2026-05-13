@@ -24,7 +24,7 @@ class VidlinkScraper {
 
   static String _watchUrl(String tmdbId, int? season, int? episode) {
     if (season != null && episode != null) {
-      return 'https://vidlink.pro/tv/$tmdbId/s/$season/e/$episode';
+      return 'https://vidlink.pro/tv/$tmdbId/$season/$episode';
     }
     return 'https://vidlink.pro/movie/$tmdbId';
   }
@@ -85,33 +85,51 @@ class VidlinkScraper {
     );
     Overlay.of(context).insert(overlayEntry);
 
-    // Wait for the WebView to load
-    await Future<void>.delayed(const Duration(seconds: 25));
+    // Poll for iframe element instead of fixed timeout
+    final int maxAttempts = 40; // 20 seconds total (40 * 500ms)
+    int attempts = 0;
+    bool iframeFound = false;
 
-    // Try to extract stream from page
+    while (attempts < maxAttempts && !iframeFound && mounted) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      attempts++;
+
+      if (controller != null) {
+        try {
+          final String? html = await controller.evaluateJavascript(
+            source: '''(() => {
+              const iframe = document.querySelector('iframe');
+              return iframe ? iframe.outerHTML : null;
+            })()''',
+          );
+          if (html != null && html.contains('<iframe')) {
+            iframeFound = true;
+            debugPrint('[Vidlink] iframe found after ${attempts * 500}ms');
+            break;
+          }
+        } catch (e) {
+          debugPrint('[Vidlink] polling error: $e');
+        }
+      }
+    }
+
+    // Try to extract stream from iframe
     if (controller != null && foundStreamUrl == null) {
       try {
         final String? html = await controller.evaluateJavascript(
-          source: 'document.documentElement.outerHTML',
+          source: '''(() => {
+              const iframe = document.querySelector('iframe');
+              return iframe ? iframe.src : null;
+            })()''',
         );
-        if (html != null) {
-          // Look for iframe src
-          final srcStart = html.indexOf('<iframe');
-          if (srcStart >= 0) {
-            final srcSubstr = html.substring(srcStart, srcStart + 300);
-            final srcIdx = srcSubstr.indexOf('src=');
-            if (srcIdx >= 0) {
-              final afterSrc = srcSubstr.substring(srcIdx + 4);
-              final firstQuote = afterSrc.indexOf('"');
-              final secondQuote = afterSrc.indexOf('"', firstQuote + 1);
-              if (firstQuote >= 0 && secondQuote > firstQuote) {
-                final src = afterSrc.substring(firstQuote + 1, secondQuote);
-                if (_isStreamUrl(src)) {
-                  foundStreamUrl = src;
-                  debugPrint('[Vidlink] found src: $foundStreamUrl');
-                }
-              }
-            }
+        if (html != null && html.isNotEmpty) {
+          foundStreamUrl = html;
+          debugPrint('[Vidlink] found iframe src: $foundStreamUrl');
+
+          // Validate it looks like a stream URL
+          if (!_isStreamUrl(foundStreamUrl)) {
+            debugPrint('[Vidlink] WARNING: iframe src does not look like stream URL');
+            // Still try to use it - sometimes validation is too strict
           }
         }
       } catch (e) {
@@ -122,7 +140,7 @@ class VidlinkScraper {
     overlayEntry.remove();
     debugPrint('[Vidlink] done, found: $foundStreamUrl');
 
-    if (foundStreamUrl != null) {
+    if (foundStreamUrl != null && foundStreamUrl.isNotEmpty) {
       return StreamResult(
         sourceId: 'vidlink',
         sourceName: 'VidLink',
@@ -130,11 +148,11 @@ class VidlinkScraper {
         embedName: null,
         stream: StreamPlayback(
           id: 'vidlink-primary',
-          type: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'file',
-          playlist: foundStreamUrl!.contains('.m3u8') ? foundStreamUrl : null,
+          type: foundStreamUrl.contains('.m3u8') ? 'hls' : 'file',
+          playlist: foundStreamUrl.contains('.m3u8') ? foundStreamUrl : null,
           proxiedPlaylist: null,
           playbackUrl: foundStreamUrl,
-          playbackType: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'mp4',
+          playbackType: foundStreamUrl.contains('.m3u8') ? 'hls' : 'mp4',
           selectedQuality: null,
           qualities: {},
           headers: {'User-Agent': _userAgent},

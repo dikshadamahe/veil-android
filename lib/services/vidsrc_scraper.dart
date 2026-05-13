@@ -22,7 +22,27 @@ class VidsrcScraper {
       'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
-  static String _embedUrl(String tmdbId, int? season, int? episode) {
+  static String _embedUrl(String tmdbId, int? season, int? episode, {String? imdbId}) {
+    // Use the vsembed.su domain as it redirects from vidsrc-embed.ru
+    final String baseUrl = 'https://vsembed.su';
+
+    if (season != null && episode != null) {
+      // TV show episode
+      if (tmdbId.isNotEmpty) {
+        return '$baseUrl/embed/tv/$tmdbId/$season-$episode';
+      } else if (imdbId != null && imdbId.isNotEmpty) {
+        return '$baseUrl/embed/tv/$imdbId/$season-$episode';
+      }
+    } else {
+      // Movie
+      if (tmdbId.isNotEmpty) {
+        return '$baseUrl/embed/movie/$tmdbId';
+      } else if (imdbId != null && imdbId.isNotEmpty) {
+        return '$baseUrl/embed/movie/$imdbId';
+      }
+    }
+
+    // Fallback to old format if no IDs provided
     if (season != null && episode != null) {
       return 'https://vidsrcme.ru/embed/tv?tmdb=$tmdbId&season=$season&episode=$episode';
     }
@@ -85,24 +105,107 @@ class VidsrcScraper {
     );
     Overlay.of(context).insert(overlayEntry);
 
-    // Wait for the WebView to load and capture stream
-    await Future<void>.delayed(const Duration(seconds: 25));
+    // Poll for video element or network activity instead of fixed timeout
+    final int maxAttempts = 30; // 15 seconds total (30 * 500ms)
+    int attempts = 0;
+    bool ready = false;
 
-    // Try to get stream URL from WebView if we have controller
+    while (attempts < maxAttempts && !ready && mounted) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      attempts++;
+
+      if (controller != null) {
+        try {
+          // Check if video element exists or if we have network activity indicating stream loading
+          final String? status = await controller.evaluateJavascript(
+            source: '''(() => {
+              // Check for video element
+              const video = document.querySelector('video');
+              if (video && (video.src || video.currentSrc)) {
+                return 'video_ready';
+              }
+
+              // Check for common player containers that might indicate stream is loading
+              const players = document.querySelectorAll('[id*="player"], [class*="player"], video');
+              if (players.length > 0) {
+                return 'player_present';
+              }
+
+              // Check if network tab would show activity (indirect check)
+              return 'waiting';
+            })()''',
+          );
+
+          if (status == 'video_ready' || status == 'player_present') {
+            ready = true;
+            debugPrint('[Vidsrc] ready after ${attempts * 500}ms: $status');
+            break;
+          }
+        } catch (e) {
+          debugPrint('[Vidsrc] polling error: $e');
+        }
+      }
+    }
+
+    // Try to get stream URL from the page
     if (controller != null && foundStreamUrl == null) {
       try {
-        final String? html = await controller.evaluateJavascript(
-          source: 'document.documentElement.outerHTML',
+        // First try to get any video element src directly
+        final String? videoSrc = await controller.evaluateJavascript(
+          source: '''(() => {
+              const video = document.querySelector('video');
+              if (video) {
+                return video.src || video.currentSrc || null;
+              }
+              return null;
+            })()''',
         );
-        if (html != null && html.contains('data-config')) {
-          final startIdx = html.indexOf('data-config=');
-          if (startIdx >= 0) {
-            final substring = html.substring(startIdx, startIdx + 200);
-            final firstQuote = substring.indexOf('"');
-            final secondQuote = substring.indexOf('"', firstQuote + 1);
-            if (firstQuote >= 0 && secondQuote > firstQuote) {
-              foundStreamUrl = substring.substring(firstQuote + 1, secondQuote);
-              debugPrint('[Vidsrc] found data-config: $foundStreamUrl');
+
+        if (videoSrc != null && videoSrc.isNotEmpty && _isStreamUrl(videoSrc)) {
+          foundStreamUrl = videoSrc;
+          debugPrint('[Vidsrc] found video src: $foundStreamUrl');
+        } else {
+          // Try to get iframe src as fallback
+          final String? iframeSrc = await controller.evaluateJavascript(
+            source: '''(() => {
+                const iframe = document.querySelector('iframe');
+                return iframe ? iframe.src : null;
+              })()''',
+          );
+
+          if (iframeSrc != null && iframeSrc.isNotEmpty && _isStreamUrl(iframeSrc)) {
+            foundStreamUrl = iframeSrc;
+            debugPrint('[Vidsrc] found iframe src: $foundStreamUrl');
+          } else {
+            // Try to extract from potential config or data attributes
+            final String? configData = await controller.evaluateJavascript(
+              source: '''(() => {
+                  // Look for common config patterns
+                  const scripts = document.querySelectorAll('script');
+                  for (let script of scripts) {
+                    if (script.textContent) {
+                      const text = script.textContent;
+                      // Look for common patterns in Vidsrc players
+                      if (text.includes('src:') || text.includes('file:') || text.includes('videoUrl')) {
+                        // Try to extract URL-like strings
+                        const urlMatches = text.match(/https?:\/\/[^\s"']+/g);
+                        if (urlMatches) {
+                          for (const url of urlMatches) {
+                            if (url.includes('.m3u8') || url.includes('.mp4')) {
+                              return url;
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                  return null;
+              })()''',
+            );
+
+            if (configData != null && configData.isNotEmpty && _isStreamUrl(configData)) {
+              foundStreamUrl = configData;
+              debugPrint('[Vidsrc] found config data: $foundStreamUrl');
             }
           }
         }
@@ -114,7 +217,7 @@ class VidsrcScraper {
     overlayEntry.remove();
     debugPrint('[Vidsrc] done, found: $foundStreamUrl');
 
-    if (foundStreamUrl != null) {
+    if (foundStreamUrl != null && foundStreamUrl.isNotEmpty) {
       return StreamResult(
         sourceId: 'vidsrc',
         sourceName: 'Vidsrc',
@@ -122,11 +225,11 @@ class VidsrcScraper {
         embedName: null,
         stream: StreamPlayback(
           id: 'vidsrc-primary',
-          type: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'file',
-          playlist: foundStreamUrl!.contains('.m3u8') ? foundStreamUrl : null,
+          type: foundStreamUrl.contains('.m3u8') ? 'hls' : 'file',
+          playlist: foundStreamUrl.contains('.m3u8') ? foundStreamUrl : null,
           proxiedPlaylist: null,
           playbackUrl: foundStreamUrl,
-          playbackType: foundStreamUrl!.contains('.m3u8') ? 'hls' : 'mp4',
+          playbackType: foundStreamUrl.contains('.m3u8') ? 'hls' : 'mp4',
           selectedQuality: null,
           qualities: {},
           headers: {'User-Agent': _userAgent},
