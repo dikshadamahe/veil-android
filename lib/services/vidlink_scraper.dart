@@ -50,119 +50,88 @@ class VidlinkScraper {
   }) async {
     debugPrint('[Vidlink] scrape start tmdbId=$tmdbId season=$season episode=$episode');
 
-    String? foundStreamUrl;
-    OverlayEntry? overlayEntry;
-    InAppWebViewController? controller;
-
     final url = _watchUrl(tmdbId, season, episode);
     debugPrint('[Vidlink] Loading URL: $url');
 
-    overlayEntry = OverlayEntry(
-      builder: (BuildContext context) => Positioned(
-        top: MediaQuery.of(context).size.height * 0.5,
-        left: 20,
-        right: 20,
-        child: Material(
-          color: Colors.black87,
-          borderRadius: BorderRadius.circular(12),
-          child: const Padding(
-            padding: EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+    // Show dialog with web view and loading indicator
+    return await showDialog<StreamResult?>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return PopScope(
+          canPop: false,
+          child: Dialog(
+            backgroundColor: Colors.transparent,
+            child: Stack(
               children: [
-                CircularProgressIndicator(color: Colors.white),
-                SizedBox(height: 16),
-                Text(
-                  'Loading VidLink...',
-                  style: TextStyle(color: Colors.white, fontSize: 16),
+                InAppWebView(
+                  initialUrlRequest: URLRequest(url: WebUri(url)),
+                  initialSettings: InAppWebViewSettings(
+                    javaScriptEnabled: true,
+                    mediaPlaybackRequiresUserGesture: false,
+                    allowsInlineMediaPlayback: true,
+                    userAgent: _userAgent,
+                  ),
+                  shouldOverrideUrlLoading: (controller, navigationAction) async {
+                    final urlStr = navigationAction.request.url?.toString();
+                    if (_isStreamUrl(urlStr) && urlStr != null) {
+                      debugPrint('[Vidlink] shouldOverrideUrlLoading: $urlStr');
+                      // Found a stream URL, close dialog and return result
+                      if (context.mounted) {
+                        Navigator.of(context).pop(StreamResult(
+                          sourceId: 'vidlink',
+                          sourceName: 'VidLink',
+                          embedId: null,
+                          embedName: null,
+                          stream: StreamPlayback(
+                            id: 'vidlink-primary',
+                            type: urlStr.contains('.m3u8') ? 'hls' : 'file',
+                            playlist: urlStr.contains('.m3u8') ? urlStr : null,
+                            proxiedPlaylist: null,
+                            playbackUrl: urlStr,
+                            playbackType: urlStr.contains('.m3u8') ? 'hls' : 'mp4',
+                            selectedQuality: null,
+                            qualities: {},
+                            headers: {'User-Agent': _userAgent},
+                            preferredHeaders: {},
+                            captions: const [],
+                            flags: const [],
+                          ),
+                        ));
+                      }
+                      return NavigationActionPolicy.CANCEL;
+                    }
+                    return NavigationActionPolicy.ALLOW;
+                  },
+                  onLoadStop: (controller, url) async {
+                    final urlStr = url?.toString();
+                    debugPrint('[Vidlink] onLoadStop: $urlStr');
+                  },
+                ),
+                Positioned(
+                  top: MediaQuery.of(context).size.height * 0.5 - 25,
+                  left: MediaQuery.of(context).size.width * 0.5 - 25,
+                  child: Container(
+                    width: 50,
+                    height: 50,
+                    decoration: BoxDecoration(
+                      color: Colors.black87,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 3,
+                      ),
+                    ),
+                  ),
                 ),
               ],
             ),
           ),
-        ),
-      ),
-    );
-    Overlay.of(context).insert(overlayEntry);
-
-    // Poll for iframe element instead of fixed timeout
-    final int maxAttempts = 40; // 20 seconds total (40 * 500ms)
-    int attempts = 0;
-    bool iframeFound = false;
-
-    while (attempts < maxAttempts && !iframeFound && context.mounted) {
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-      attempts++;
-
-      if (controller != null) {
-        try {
-          final String? html = await controller.evaluateJavascript(
-            source: '''(() => {
-              const iframe = document.querySelector('iframe');
-              return iframe ? iframe.outerHTML : null;
-            })()''',
-          );
-          if (html != null && html.contains('<iframe')) {
-            iframeFound = true;
-            debugPrint('[Vidlink] iframe found after ${attempts * 500}ms');
-            break;
-          }
-        } catch (e) {
-          debugPrint('[Vidlink] polling error: $e');
-        }
-      }
-    }
-
-    // Try to extract stream from iframe
-    if (controller != null && foundStreamUrl == null) {
-      final controllerNotNull = controller;
-      try {
-        final String? html = await controllerNotNull.evaluateJavascript(
-          source: '''(() => {
-              const iframe = document.querySelector('iframe');
-              return iframe ? iframe.src : null;
-            })()''',
         );
-        if (html != null && html.isNotEmpty) {
-          foundStreamUrl = html;
-          debugPrint('[Vidlink] found iframe src: $foundStreamUrl');
-
-          // Validate it looks like a stream URL
-          if (!_isStreamUrl(foundStreamUrl)) {
-            debugPrint('[Vidlink] WARNING: iframe src does not look like stream URL');
-            // Still try to use it - sometimes validation is too strict
-          }
-        }
-      } catch (e) {
-        debugPrint('[Vidlink] eval error: $e');
-      }
-    }
-
-    overlayEntry.remove();
-    debugPrint('[Vidlink] done, found: $foundStreamUrl');
-
-    if (foundStreamUrl != null && foundStreamUrl.isNotEmpty) {
-      return StreamResult(
-        sourceId: 'vidlink',
-        sourceName: 'VidLink',
-        embedId: null,
-        embedName: null,
-        stream: StreamPlayback(
-          id: 'vidlink-primary',
-          type: foundStreamUrl.contains('.m3u8') ? 'hls' : 'file',
-          playlist: foundStreamUrl.contains('.m3u8') ? foundStreamUrl : null,
-          proxiedPlaylist: null,
-          playbackUrl: foundStreamUrl,
-          playbackType: foundStreamUrl.contains('.m3u8') ? 'hls' : 'mp4',
-          selectedQuality: null,
-          qualities: {},
-          headers: {'User-Agent': _userAgent},
-          preferredHeaders: {},
-          captions: const [],
-          flags: const [],
-        ),
-      );
-    }
-
-    return null;
+      },
+    );
   }
 }
