@@ -114,9 +114,10 @@ class VidsrcScraper {
       attempts++;
 
       if (controller != null) {
+        final controllerNotNull = controller;
         try {
           // Check if video element exists or if we have network activity indicating stream loading
-          final String? status = await controller.evaluateJavascript(
+          final String? status = await controllerNotNull.evaluateJavascript(
             source: '''(() => {
               // Check for video element
               const video = document.querySelector('video');
@@ -148,9 +149,10 @@ class VidsrcScraper {
 
     // Try to get stream URL from the page
     if (controller != null && foundStreamUrl == null) {
+      final controllerNotNull = controller;
       try {
         // First try to get any video element src directly
-        final String? videoSrc = await controller.evaluateJavascript(
+        final String? videoSrc = await controllerNotNull.evaluateJavascript(
           source: '''(() => {
               const video = document.querySelector('video');
               if (video) {
@@ -165,7 +167,7 @@ class VidsrcScraper {
           debugPrint('[Vidsrc] found video src: $foundStreamUrl');
         } else {
           // Try to get iframe src as fallback
-          final String? iframeSrc = await controller.evaluateJavascript(
+          final String? iframeSrc = await controllerNotNull.evaluateJavascript(
             source: '''(() => {
                 const iframe = document.querySelector('iframe');
                 return iframe ? iframe.src : null;
@@ -177,7 +179,7 @@ class VidsrcScraper {
             debugPrint('[Vidsrc] found iframe src: $foundStreamUrl');
           } else {
             // Try to extract from potential config or data attributes
-            final String? configData = await controller.evaluateJavascript(
+            final String? configData = await controllerNotNull.evaluateJavascript(
               source: "(() => {\n"
                   "  const scripts = document.querySelectorAll('script');\n"
                   "  for (let script of scripts) {\n"

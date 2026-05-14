@@ -114,8 +114,9 @@ class VidlinkScraper {
 
     // Try to extract stream from iframe
     if (controller != null && foundStreamUrl == null) {
+      final controllerNotNull = controller;
       try {
-        final String? html = await controller.evaluateJavascript(
+        final String? html = await controllerNotNull.evaluateJavascript(
           source: '''(() => {
               const iframe = document.querySelector('iframe');
               return iframe ? iframe.src : null;
