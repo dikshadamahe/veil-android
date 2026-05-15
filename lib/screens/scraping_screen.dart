@@ -131,9 +131,11 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     return result.failureReason ?? 'No sources in /sources response.';
   }
 
-  /// Sequential source order: Vidlink (backend) -> XPrime Finger
+  /// Sequential source order: Vidsrc -> Granite -> Vidlink -> XPrime
   static const List<String> _primarySourceOrder = <String>[
-    'vidlink',   // backend (works)
+    'vidsrc',
+    'granite',
+    'vidlink',
   ];
 
   Future<void> _startInitialScrapeSequence() async {
