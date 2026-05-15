@@ -33,30 +33,13 @@ class VidsrcScraper {
         lower.contains('file');
   }
 
-  static String _embedUrl(String tmdbId, int? season, int? episode, {String? imdbId}) {
-    // Use the vsembed.su domain as it redirects from vidsrc-embed.ru
-    final String baseUrl = 'https://vsembed.su';
-
+  static String _embedUrl(String tmdbId, int? season, int? episode) {
+    // Direct vidsrcme.ru URLs as provided
     if (season != null && episode != null) {
-      // TV show episode
-      if (tmdbId.isNotEmpty) {
-        return '$baseUrl/embed/tv/$tmdbId/$season-$episode';
-      } else if (imdbId != null && imdbId.isNotEmpty) {
-        return '$baseUrl/embed/tv/$imdbId/$season-$episode';
-      }
-    } else {
-      // Movie
-      if (tmdbId.isNotEmpty) {
-        return '$baseUrl/embed/movie/$tmdbId';
-      } else if (imdbId != null && imdbId.isNotEmpty) {
-        return '$baseUrl/embed/movie/$imdbId';
-      }
-    }
-
-    // Fallback to old format if no IDs provided
-    if (season != null && episode != null) {
+      // Series: https://vidsrcme.ru/embed/tv?tmdb={tmdb Id number}&season={season no.}&episode={episode no.}
       return 'https://vidsrcme.ru/embed/tv?tmdb=$tmdbId&season=$season&episode=$episode';
     }
+    // Movie: https://vidsrcme.ru/embed/movie?tmdb={tmdb Id number}
     return 'https://vidsrcme.ru/embed/movie?tmdb=$tmdbId';
   }
 

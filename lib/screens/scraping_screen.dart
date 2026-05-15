@@ -234,9 +234,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     // Add individual XPrime sources instead of "Auto"
     // Priority: Finger first, then rest in defined order
     final List<ScrapeSourceDefinition> xprimeSources =
-        XprimeScraper.sourceDefinitions
-            .where((ScrapeSourceDefinition s) => s.id != XprimeScraper.autoSourceId)
-            .toList();
+        XprimeScraper.sourceDefinitions.toList();
 
     // Reorder so Finger is first
     xprimeSources.sort((ScrapeSourceDefinition a, ScrapeSourceDefinition b) {
@@ -403,7 +401,8 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     setState(() {
       for (final ScrapeSourceDefinition source in sources.where(
         (ScrapeSourceDefinition source) =>
-            source.supportsMediaType(_scrapeMediaType),
+            source.supportsMediaType(_scrapeMediaType) &&
+            source.id != 'xprime:auto',
       )) {
         if (source.id.isEmpty) {
           continue;
@@ -531,9 +530,8 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
   List<String> _manualSourceIds() {
     final List<String> ids = <String>[];
-    // Exclude auto source - show only individual XPrime providers
-    for (final ScrapeSourceDefinition source in XprimeScraper.sourceDefinitions
-        .where((s) => s.id != XprimeScraper.autoSourceId)) {
+    // Show all XPrime providers (auto source removed)
+    for (final ScrapeSourceDefinition source in XprimeScraper.sourceDefinitions) {
       ids.add(source.id);
     }
     for (final String id in _orderedSourceIdsForUi()) {
@@ -546,7 +544,6 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
   List<String> _xprimeSourceIds() {
     return XprimeScraper.sourceDefinitions
-        .where((s) => s.id != XprimeScraper.autoSourceId)
         .map((ScrapeSourceDefinition source) => source.id)
         .toList();
   }
@@ -701,7 +698,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return;
     }
 
-    context.pushReplacement(
+    context.push(
       '/player',
       extra: PlayerScreenArgs(
         mediaItem: widget.mediaItem,

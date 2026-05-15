@@ -1239,7 +1239,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   // Priority order: Vidsrc -> Granite (vidrock) -> Vidlink -> XPrime -> others
                   final List<String> sourcePriority = <String>[
                     'vidsrc',
-                    'vidrock',
+                    'granite',
                     'vidlink',
                   ];
                   final List<ScrapeSourceDefinition> sortedBackendSources =

@@ -14,8 +14,8 @@ class AppConfig {
   static bool get hasTmdbReadToken => tmdbReadToken.trim().isNotEmpty;
 
   /// Fixed source order for UI display (backend).
-  /// Priority: Vidlink -> XPrime Finger
-  static const String scrapeSourceOrder = 'vidlink,xprime:finger';
+  /// Priority: Vidsrc -> Granite -> Vidlink -> XPrime (Finger, Primebox, King, Facile, Lighter, Fed, Eek)
+  static const String scrapeSourceOrder = 'vidsrc,granite,vidlink,xprime:finger,xprime:primebox,xprime:king,xprime:facile,xprime:lighter,xprime:fed,xprime:eek';
 
   static List<String>? get scrapeSourceOrderList {
     final List<String> ids = scrapeSourceOrder

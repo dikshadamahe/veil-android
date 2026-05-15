@@ -25,12 +25,6 @@ class XprimeScraper {
   static const List<ScrapeSourceDefinition> sourceDefinitions =
       <ScrapeSourceDefinition>[
     ScrapeSourceDefinition(
-      id: 'xprime:auto',
-      name: 'Auto (XPrime)',
-      type: 'source',
-      mediaTypes: <String>['movie', 'show'],
-    ),
-    ScrapeSourceDefinition(
       id: 'xprime:finger',
       name: 'Finger (XPrime)',
       type: 'source',
@@ -73,8 +67,6 @@ class XprimeScraper {
       mediaTypes: <String>['movie', 'show'],
     ),
   ];
-
-  static const String autoSourceId = 'xprime:auto';
 
   static void _log(String message) {
     debugPrint('[XPrime] $message');
@@ -643,7 +635,7 @@ class XprimeScraper {
 
   static String sourceIdForProvider(String? provider) {
     final String normalized = provider?.trim().toLowerCase() ?? '';
-    return normalized.isEmpty ? autoSourceId : 'xprime:$normalized';
+    return normalized.isEmpty ? 'xprime:finger' : 'xprime:$normalized';
   }
 
   static String labelForProvider(String? provider) {
@@ -663,7 +655,7 @@ class XprimeScraper {
       case 'eek':
         return 'Eek (XPrime)';
       default:
-        return 'Auto (XPrime)';
+        return 'Finger (XPrime)';
     }
   }
 
