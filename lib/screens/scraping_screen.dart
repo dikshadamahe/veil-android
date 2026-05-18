@@ -11,6 +11,8 @@ import 'package:pstream_android/models/stream_result.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/screens/player_screen.dart';
 import 'package:pstream_android/services/stream_service.dart';
+import 'package:pstream_android/services/vidlink_scraper.dart';
+import 'package:pstream_android/services/vidsrc_scraper.dart';
 import 'package:pstream_android/services/xprime_scraper.dart';
 import 'package:pstream_android/widgets/scrape_source_card.dart'
     show ScrapeSourceCard, ScrapeStatus, StatusCircle;
@@ -69,6 +71,8 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
   StreamSubscription<ScrapeEvent>? _scrapeSubscription;
   late final StreamService _streamService;
   late final XprimeScraper _xprimeScraper;
+  late final VidlinkScraper _vidlinkScraper;
+  late final VidsrcScraper _vidsrcScraper;
   bool _isLoading = true;
   bool _allFailure = false;
   String? _failureMessage;
@@ -81,6 +85,8 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     super.initState();
     _streamService = ref.read(streamServiceProvider);
     _xprimeScraper = const XprimeScraper();
+    _vidlinkScraper = const VidlinkScraper();
+    _vidsrcScraper = const VidsrcScraper();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startInitialScrapeSequence();
       unawaited(_primeCatalog());
@@ -131,57 +137,53 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     return result.failureReason ?? 'No sources in /sources response.';
   }
 
-  /// Sequential source order: Vidsrc -> Granite -> Vidlink -> XPrime
-  static const List<String> _primarySourceOrder = <String>[
+  /// Backend sources tried last via Oracle VM
+  static const List<String> _backendSourceOrder = <String>[
     'vidsrc',
     'granite',
     'vidlink',
   ];
 
+  /// Client-side WebView scrapers tried first (fast, no backend dependency)
+  static const List<String> _clientSideSourceIds = <String>[
+    'vidsrc-client',
+    'vidlink-client',
+  ];
+
   Future<void> _startInitialScrapeSequence() async {
     _ensurePrimaryXprimeNode();
+    _ensureClientSideNodes();
     _setLoading(true);
 
-    // Try backend sources first
-    for (final String sourceId in _primarySourceOrder) {
-      debugPrint('[SCRAPE] Trying source: $sourceId');
-      _updateStatus(sourceId, ScrapeStatus.pending);
-      _currentPendingSourceId = sourceId;
+    // 1. Try client-side WebView scrapers first (Vidsrc, then Vidlink)
+    for (final String clientSourceId in _clientSideSourceIds) {
+      debugPrint('[SCRAPE] Trying client-side scraper: $clientSourceId');
+      _updateStatus(clientSourceId, ScrapeStatus.pending);
+      _currentPendingSourceId = clientSourceId;
 
       try {
-        debugPrint('[SCRAPE] Calling scrapeSingleSource for: $sourceId');
-        final StreamResult? result = await _streamService.scrapeSingleSource(
-          widget.mediaItem,
-          selectedId: sourceId,
-          selectedType: 'source',
-          season: widget.season,
-          episode: widget.episode,
-          seasonTmdbId: widget.seasonTmdbId,
-          episodeTmdbId: widget.episodeTmdbId,
-          seasonTitle: widget.seasonTitle,
-        );
-        debugPrint('[SCRAPE] Result for $sourceId: ${result != null ? "success" : "null"}');
+        final StreamResult? clientResult =
+            await _tryClientSideScraper(clientSourceId);
+        debugPrint('[SCRAPE] Client-side $clientSourceId: '
+            '${clientResult != null ? "success" : "null"}');
 
         if (!mounted) {
           return;
         }
 
-        if (result != null) {
-          debugPrint('[SCRAPE] SUCCESS - using source: $sourceId');
-          _updateStatus(sourceId, ScrapeStatus.success);
-          _navigateToPlayer(result);
+        if (clientResult != null) {
+          _updateStatus(clientSourceId, ScrapeStatus.success);
+          _navigateToPlayer(clientResult);
           return;
         }
 
-        debugPrint('[SCRAPE] $sourceId returned null, marking notfound');
-        _updateStatus(sourceId, ScrapeStatus.notfound);
-      } catch (e, st) {
-        debugPrint('[SCRAPE] ERROR on $sourceId: $e');
-        debugPrint('[SCRAPE] Stack: $st');
+        _updateStatus(clientSourceId, ScrapeStatus.notfound);
+      } catch (e) {
+        debugPrint('[SCRAPE] Client-side $clientSourceId error: $e');
         if (!mounted) {
           return;
         }
-        _updateStatus(sourceId, ScrapeStatus.failure);
+        _updateStatus(clientSourceId, ScrapeStatus.failure);
       }
     }
 
@@ -189,7 +191,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return;
     }
 
-    // Backend failed, try XPrime Finger
+    // 2. Try XPrime Finger
     const String fingerSourceId = 'xprime:finger';
     _updateStatus(fingerSourceId, ScrapeStatus.pending);
     _currentPendingSourceId = fingerSourceId;
@@ -227,7 +229,52 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return;
     }
 
-    // All primary sources failed, start stream scrape for remaining sources
+    // 3. Try backend sources via Oracle VM (Vidsrc -> Granite -> Vidlink)
+    for (final String sourceId in _backendSourceOrder) {
+      debugPrint('[SCRAPE] Trying backend source: $sourceId');
+      _updateStatus(sourceId, ScrapeStatus.pending);
+      _currentPendingSourceId = sourceId;
+
+      try {
+        final StreamResult? result = await _streamService.scrapeSingleSource(
+          widget.mediaItem,
+          selectedId: sourceId,
+          selectedType: 'source',
+          season: widget.season,
+          episode: widget.episode,
+          seasonTmdbId: widget.seasonTmdbId,
+          episodeTmdbId: widget.episodeTmdbId,
+          seasonTitle: widget.seasonTitle,
+        );
+        debugPrint('[SCRAPE] Backend $sourceId: '
+            '${result != null ? "success" : "null"}');
+
+        if (!mounted) {
+          return;
+        }
+
+        if (result != null) {
+          _updateStatus(sourceId, ScrapeStatus.success);
+          _navigateToPlayer(result);
+          return;
+        }
+
+        _updateStatus(sourceId, ScrapeStatus.notfound);
+      } catch (e, st) {
+        debugPrint('[SCRAPE] Backend $sourceId error: $e');
+        debugPrint('[SCRAPE] Stack: $st');
+        if (!mounted) {
+          return;
+        }
+        _updateStatus(sourceId, ScrapeStatus.failure);
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    // 4. All sources failed, start SSE stream scrape for remaining sources
     _currentPendingSourceId = null;
     _startStreamScrape();
   }
@@ -262,6 +309,48 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
         () => ScrapeStatus.waiting,
       );
     }
+  }
+
+  void _ensureClientSideNodes() {
+    for (final ScrapeSourceDefinition source
+        in VidlinkScraper.sourceDefinitions) {
+      if (_nodes.containsKey(source.id)) continue;
+      _nodes[source.id] = _ScrapeNode(id: source.id, name: source.name);
+      _sourceOrder.add(source.id);
+      _statuses.putIfAbsent(source.id, () => ScrapeStatus.waiting);
+    }
+    for (final ScrapeSourceDefinition source
+        in VidsrcScraper.sourceDefinitions) {
+      if (_nodes.containsKey(source.id)) continue;
+      _nodes[source.id] = _ScrapeNode(id: source.id, name: source.name);
+      _sourceOrder.add(source.id);
+      _statuses.putIfAbsent(source.id, () => ScrapeStatus.waiting);
+    }
+  }
+
+  Future<StreamResult?> _tryClientSideScraper(String sourceId) async {
+    final String tmdbId = '${widget.mediaItem.tmdbId}';
+    if (sourceId == 'vidlink-client') {
+      return _vidlinkScraper.scrape(
+        context: context,
+        tmdbId: tmdbId,
+        title: widget.mediaItem.title,
+        year: widget.mediaItem.year,
+        season: widget.season,
+        episode: widget.episode,
+      );
+    }
+    if (sourceId == 'vidsrc-client') {
+      return _vidsrcScraper.scrape(
+        context: context,
+        tmdbId: tmdbId,
+        title: widget.mediaItem.title,
+        year: widget.mediaItem.year,
+        season: widget.season,
+        episode: widget.episode,
+      );
+    }
+    return null;
   }
 
   void _startStreamScrape() {
@@ -428,19 +517,25 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       return <String>[];
     }
     final List<String> out = <String>[];
-    // Add backend sources first (Vidsrc, Granite, Vidlink)
+    // 1. Client-side scrapers first (Vidsrc, Vidlink)
+    for (final String id in _clientSideSourceIds) {
+      if (known.contains(id) && !out.contains(id)) {
+        out.add(id);
+      }
+    }
+    // 2. XPrime sources (Finger first, then others)
+    for (final String id in _sourceOrder) {
+      if (id.startsWith('xprime:') && !out.contains(id)) {
+        out.add(id);
+      }
+    }
+    // 3. Backend sources via Oracle VM (Vidsrc, Granite, Vidlink)
     final List<String>? preferred = AppConfig.scrapeSourceOrderList;
     if (preferred != null) {
       for (final String id in preferred) {
         if (known.contains(id) && !out.contains(id)) {
           out.add(id);
         }
-      }
-    }
-    // Then add XPrime sources (Finger first, then others)
-    for (final String id in _sourceOrder) {
-      if (id.startsWith('xprime:') && !out.contains(id)) {
-        out.add(id);
       }
     }
     // Add any remaining sources
@@ -561,6 +656,12 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
         return source.name.replaceAll(' (XPrime)', '');
       }
     }
+    for (final ScrapeSourceDefinition source in VidlinkScraper.sourceDefinitions) {
+      if (source.id == sourceId) return source.name;
+    }
+    for (final ScrapeSourceDefinition source in VidsrcScraper.sourceDefinitions) {
+      if (source.id == sourceId) return source.name;
+    }
     return sourceId;
   }
 
@@ -633,19 +734,23 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     });
 
     try {
-      final StreamResult? result = sourceId.startsWith('xprime:')
-          ? await _xprimeScraper.scrape(
-              // ignore: use_build_context_synchronously
-              context: context,
-              tmdbId: '${widget.mediaItem.tmdbId}',
-              title: widget.mediaItem.title,
-              year: widget.mediaItem.year,
-              season: widget.season,
-              episode: widget.episode,
-              // Extract provider from xprime:<provider> format
-              provider: sourceId.substring('xprime:'.length),
-            )
-          : await _streamService.scrapeSingleSource(
+      StreamResult? result;
+      if (sourceId.startsWith('xprime:')) {
+        result = await _xprimeScraper.scrape(
+          // ignore: use_build_context_synchronously
+          context: context,
+          tmdbId: '${widget.mediaItem.tmdbId}',
+          title: widget.mediaItem.title,
+          year: widget.mediaItem.year,
+          season: widget.season,
+          episode: widget.episode,
+          // Extract provider from xprime:<provider> format
+          provider: sourceId.substring('xprime:'.length),
+        );
+      } else if (_clientSideSourceIds.contains(sourceId)) {
+        result = await _tryClientSideScraper(sourceId);
+      } else {
+        result = await _streamService.scrapeSingleSource(
               widget.mediaItem,
               selectedId: sourceId,
               selectedType: 'source',
@@ -655,6 +760,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
               episodeTmdbId: widget.episodeTmdbId,
               seasonTitle: widget.seasonTitle,
             );
+      }
 
       if (!context.mounted) {
         return;
@@ -675,7 +781,7 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
         _isLoading = false;
         _statuses[sourceId] = ScrapeStatus.success;
         _currentPendingSourceId = null;
-        if (result.embedId != null) {
+        if (result!.embedId != null) {
           _statuses[result.embedId!] = ScrapeStatus.success;
         }
       });
