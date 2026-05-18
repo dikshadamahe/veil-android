@@ -65,35 +65,74 @@ class VidlinkScraper {
     }
 
     StreamResult? buildStreamResultFromData(Map<String, dynamic> data) {
-      // Look for stream object in the data
-      final dynamic streamData = data['stream'] ?? data;
+      // Vidlink API response has { sourceId, stream: { type, qualities, playlist, captions, headers } }
+      final dynamic streamData = data['stream'];
       if (streamData is! Map) return null;
 
       final Map<String, dynamic> stream =
           Map<String, dynamic>.from(streamData);
 
-      // Check for direct URL
-      final String? directUrl = _readString(stream['url']) ??
-          _readString(stream['playlist']) ??
-          _readString(stream['playbackUrl']);
-
-      // Check for qualities map
+      // Read qualities map from the API response
       final Map<String, StreamQuality> qualities =
           _readQualities(stream['qualities']);
 
-      // Determine the best playback URL
+      // Find the best playback URL
+      // Priority: stormvv mp4 > stormvv HLS > any mp4 > any HLS > playlist fallback
       String? playbackUrl;
       String playbackType = 'file';
 
-      if (directUrl != null && directUrl.isNotEmpty) {
-        playbackUrl = directUrl;
-        playbackType = directUrl.contains('.m3u8') ? 'hls' : 'file';
-      } else if (qualities.isNotEmpty) {
-        // Pick best quality (prefer 1080p -> 720p -> 480p)
-        final String? bestKey = _pickBestQuality(qualities);
-        if (bestKey != null) {
-          playbackUrl = qualities[bestKey]?.url;
-          playbackType = 'hls';
+      // 1. Check qualities for stormvv.vodvidl.site mp4 URLs (working domain)
+      for (final MapEntry<String, StreamQuality> entry in qualities.entries) {
+        final String? url = entry.value.url;
+        if (url != null &&
+            url.contains('stormvv.vodvidl.site') &&
+            url.contains('.mp4')) {
+          playbackUrl = url;
+          playbackType = 'mp4';
+          break;
+        }
+      }
+
+      // 2. Check qualities for any mp4 URL
+      if (playbackUrl == null) {
+        for (final MapEntry<String, StreamQuality> entry in qualities.entries) {
+          final String? url = entry.value.url;
+          if (url != null && url.contains('.mp4')) {
+            playbackUrl = url;
+            playbackType = 'mp4';
+            break;
+          }
+        }
+      }
+
+      // 3. Check for m3u8 in qualities
+      if (playbackUrl == null) {
+        for (final MapEntry<String, StreamQuality> entry in qualities.entries) {
+          final String? url = entry.value.url;
+          if (url != null && url.contains('.m3u8')) {
+            playbackUrl = url;
+            playbackType = 'hls';
+            break;
+          }
+        }
+      }
+
+      // 4. Fall back to playlist URL
+      if (playbackUrl == null) {
+        final String? playlist = _readString(stream['playlist']);
+        if (playlist != null && playlist.isNotEmpty) {
+          playbackUrl = playlist;
+          playbackType = playlist.contains('.m3u8') ? 'hls' : 'file';
+        }
+      }
+
+      // 5. Fall back to any URL in the stream object
+      if (playbackUrl == null) {
+        final String? fallback = _readString(stream['url']) ??
+            _readString(stream['playbackUrl']);
+        if (fallback != null && fallback.isNotEmpty) {
+          playbackUrl = fallback;
+          playbackType = fallback.contains('.m3u8') ? 'hls' : 'file';
         }
       }
 
@@ -102,8 +141,16 @@ class VidlinkScraper {
       // Read captions
       final List<StreamCaption> captions = _readCaptions(stream['captions']);
 
-      // Read headers
-      final Map<String, String> headers = _readStringMap(stream['headers']);
+      // Build headers - prefer API-provided headers, add Referer/Origin for proxy domains
+      Map<String, String> headers = _readStringMap(stream['headers']);
+      if (playbackUrl.contains('vodvidl.site') ||
+          playbackUrl.contains('videostr.net')) {
+        headers = <String, String>{
+          'Referer': 'https://videostr.net/',
+          'Origin': 'https://videostr.net/',
+          ...headers,
+        };
+      }
 
       _log('built stream url=$playbackUrl type=$playbackType '
           'qualities=${qualities.keys.join(',')} captions=${captions.length}');
@@ -120,7 +167,8 @@ class VidlinkScraper {
           proxiedPlaylist: null,
           playbackUrl: playbackUrl,
           playbackType: playbackType,
-          selectedQuality: qualities.isNotEmpty ? _pickBestQuality(qualities) : null,
+          selectedQuality:
+              qualities.isNotEmpty ? _pickBestQuality(qualities) : null,
           qualities: qualities,
           headers: headers,
           preferredHeaders: headers,
@@ -336,7 +384,6 @@ class VidlinkScraper {
     String body,
     Future<void> Function(Map<String, dynamic>) handlePayload,
   ) {
-    // Try to parse as JSON and look for stream data
     try {
       // Look for m3u8 URLs in the response body
       final RegExp m3u8Regex =
@@ -344,7 +391,7 @@ class VidlinkScraper {
       final Iterable<RegExpMatch> m3u8Matches = m3u8Regex.allMatches(body);
       for (final RegExpMatch match in m3u8Matches) {
         final String m3u8Url = match.group(0) ?? '';
-        if (m3u8Url.isNotEmpty) {
+        if (m3u8Url.isNotEmpty && !m3u8Url.contains('{v')) {
           _log('found m3u8 in response: $m3u8Url');
           unawaited(handlePayload(<String, dynamic>{
             'stream': <String, dynamic>{
@@ -356,16 +403,39 @@ class VidlinkScraper {
         }
       }
 
-      // Try JSON parse
-      // (dynamic decoded) - skip if not valid JSON
+      // Look for mp4 URLs from known Vidlink CDN domains
+      final RegExp mp4Regex =
+          RegExp(r'https?://[^\s"\\<>]+?\.mp4[^\s"\\<>]*');
+      final Iterable<RegExpMatch> mp4Matches = mp4Regex.allMatches(body);
+      for (final RegExpMatch match in mp4Matches) {
+        final String mp4Url = match.group(0) ?? '';
+        if (mp4Url.isNotEmpty &&
+            (mp4Url.contains('vodvidl.site') ||
+                mp4Url.contains('videostr.net'))) {
+          _log('found mp4 in response: $mp4Url');
+          unawaited(handlePayload(<String, dynamic>{
+            'stream': <String, dynamic>{
+              'url': mp4Url,
+              'type': 'mp4',
+            },
+          }));
+          return;
+        }
+      }
     } catch (_) {}
   }
 
   static bool _isMediaUrl(String url) {
+    if (url.isEmpty) return false;
     final lower = url.toLowerCase();
+    // Vidlink CDN domains
+    if (lower.contains('vodvidl.site') &&
+        (lower.contains('.mp4') || lower.contains('.m3u8'))) {
+      return true;
+    }
     return lower.contains('.m3u8') ||
         lower.contains('.mp4') ||
-        lower.contains('.ts') && lower.contains('segment');
+        (lower.contains('.ts') && lower.contains('segment'));
   }
 
   static Map<String, StreamQuality> _readQualities(dynamic raw) {
@@ -393,13 +463,14 @@ class VidlinkScraper {
   }
 
   static String? _pickBestQuality(Map<String, StreamQuality> qualities) {
+    // Prefer 720p for mobile (good balance of quality and bandwidth)
     const List<String> preferred = <String>[
-      '1080p',
-      '1080',
       '720p',
       '720',
       '480p',
       '480',
+      '1080p',
+      '1080',
       '360p',
       '360',
     ];
