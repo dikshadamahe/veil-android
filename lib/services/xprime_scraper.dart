@@ -1008,10 +1008,12 @@ class XprimeScraper {
   ) async {
     final Map<String, StreamQuality> result = <String, StreamQuality>{};
 
-    // Try proxy first (bypasses CORS), then direct
+    // Try proxy first (bypasses CORS/geo blocks), then direct
+    // simple-proxy runs on port 3000, providers-api on port 3001
+    final String proxyBase = AppConfig.proxyBaseUrl.replaceFirst(':3001', ':3000');
     String? playlistContent;
     final List<String> urlsToTry = <String>[
-      '${AppConfig.proxyBaseUrl}/proxy?url=${Uri.encodeComponent(m3u8Url)}',
+      '$proxyBase/proxy?url=${Uri.encodeComponent(m3u8Url)}',
       m3u8Url,
     ];
 

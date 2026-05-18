@@ -144,9 +144,9 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     'vidlink',
   ];
 
-  /// Client-side WebView scrapers tried first (fast, no backend dependency)
+  /// Client-side scrapers tried first (fast, no backend dependency)
+  /// Note: vidsrc-client disabled - site blocks direct HTTP (connection reset)
   static const List<String> _clientSideSourceIds = <String>[
-    'vidsrc-client',
     'vidlink-client',
   ];
 
