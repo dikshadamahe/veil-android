@@ -248,7 +248,8 @@ class XprimeScraper {
       final bool needsHlsParsing = playlistUrl != null &&
           playlistUrl.isNotEmpty &&
           (playlistUrl.toLowerCase().endsWith('.m3u8') ||
-              playlistUrl.contains('oca.lihala-n-tmurt.workers.dev'));
+              playlistUrl.contains('oca.lihala-n-tmurt.workers.dev') ||
+              playlistUrl.contains('oca.arrouah-arrouah.workers.dev'));
 
       if (needsHlsParsing) {
         _log('fetching HLS playlist: $playlistUrl');
@@ -1716,7 +1717,14 @@ class XprimeScraper {
   }
 
   static String _inferStreamType(String url) {
-    return url.toLowerCase().contains('.m3u8') ? 'hls' : 'file';
+    final lower = url.toLowerCase();
+    if (lower.contains('.m3u8')) return 'hls';
+    // XPrime worker URLs serve HLS manifests without .m3u8 extension
+    if (lower.contains('oca.lihala-n-tmurt.workers.dev') ||
+        lower.contains('oca.arrouah-arrouah.workers.dev')) {
+      return 'hls';
+    }
+    return 'file';
   }
 
   static String? _nullableString(dynamic value) {
