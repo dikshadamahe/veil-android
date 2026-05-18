@@ -1262,10 +1262,14 @@ class XprimeScraper {
       return null;
     }
 
-    final String streamType =
+    String streamType =
         qualities[selectedQuality]?.type ??
         _nullableString(data['type']) ??
         _inferStreamType(chosenUrl);
+    // Force HLS for worker URLs - the API may report 'mp4' but these serve HLS manifests
+    if (streamType != 'hls' && _isWorkerUrl(chosenUrl)) {
+      streamType = 'hls';
+    }
     _log(
       'choose stream provider=$provider selectedQuality=${selectedQuality ?? '-'} '
       'type=$streamType qualities=${qualities.keys.join('|')} '
@@ -1719,12 +1723,14 @@ class XprimeScraper {
   static String _inferStreamType(String url) {
     final lower = url.toLowerCase();
     if (lower.contains('.m3u8')) return 'hls';
-    // XPrime worker URLs serve HLS manifests without .m3u8 extension
-    if (lower.contains('oca.lihala-n-tmurt.workers.dev') ||
-        lower.contains('oca.arrouah-arrouah.workers.dev')) {
-      return 'hls';
-    }
+    if (_isWorkerUrl(url)) return 'hls';
     return 'file';
+  }
+
+  static bool _isWorkerUrl(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('oca.lihala-n-tmurt.workers.dev') ||
+        lower.contains('oca.arrouah-arrouah.workers.dev');
   }
 
   static String? _nullableString(dynamic value) {

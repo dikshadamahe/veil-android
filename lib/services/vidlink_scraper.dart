@@ -141,16 +141,13 @@ class VidlinkScraper {
       // Read captions
       final List<StreamCaption> captions = _readCaptions(stream['captions']);
 
-      // Build headers - prefer API-provided headers, add Referer/Origin for proxy domains
-      Map<String, String> headers = _readStringMap(stream['headers']);
-      if (playbackUrl.contains('vodvidl.site') ||
-          playbackUrl.contains('videostr.net')) {
-        headers = <String, String>{
-          'Referer': 'https://videostr.net/',
-          'Origin': 'https://videostr.net/',
-          ...headers,
-        };
-      }
+      // Build headers for media_kit playback
+      // The proxy URL already has upstream CDN headers in the 'headers' query param.
+      // The proxy itself needs Referer from the Vidlink page.
+      Map<String, String> headers = <String, String>{
+        'Referer': 'https://vidlink.pro/',
+        'Origin': 'https://vidlink.pro',
+      };
 
       _log('built stream url=$playbackUrl type=$playbackType '
           'qualities=${qualities.keys.join(',')} captions=${captions.length}');
@@ -506,17 +503,6 @@ class VidlinkScraper {
       }
     }
     return captions;
-  }
-
-  static Map<String, String> _readStringMap(dynamic raw) {
-    if (raw is! Map) return const <String, String>{};
-    final Map<String, String> result = <String, String>{};
-    raw.forEach((dynamic key, dynamic value) {
-      if (value != null) {
-        result['$key'] = '$value';
-      }
-    });
-    return result;
   }
 
   static String? _readString(dynamic value) {
