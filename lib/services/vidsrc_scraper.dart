@@ -115,7 +115,7 @@ class VidsrcScraper {
 
       return StreamResult(
         sourceId: 'vidsrc-client',
-        sourceName: 'Vidsrc',
+        sourceName: 'Vidsrc (Client)',
         embedId: null,
         embedName: null,
         stream: StreamPlayback(
@@ -280,7 +280,7 @@ class VidsrcScraper {
       _log('m3u8 from nested iframe: $m3u8Url');
       return StreamResult(
         sourceId: 'vidsrc-client',
-        sourceName: 'Vidsrc',
+        sourceName: 'Vidsrc (Client)',
         embedId: null,
         embedName: null,
         stream: StreamPlayback(

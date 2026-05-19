@@ -3,6 +3,8 @@ import 'dart:collection';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:http/http.dart' as http;
+import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/models/scrape_event.dart';
 import 'package:pstream_android/models/stream_result.dart';
 
@@ -154,7 +156,7 @@ class VidlinkScraper {
 
       return StreamResult(
         sourceId: 'vidlink-client',
-        sourceName: 'VidLink',
+        sourceName: 'VidLink (Client)',
         embedId: null,
         embedName: null,
         stream: StreamPlayback(
@@ -177,10 +179,42 @@ class VidlinkScraper {
 
     Future<void> handlePayload(Map<String, dynamic> payload) async {
       _log('payload keys=${payload.keys.join(',')}');
-      final StreamResult? result = buildStreamResultFromData(payload);
-      if (result != null) {
-        await finish(result);
+      StreamResult? result = buildStreamResultFromData(payload);
+      if (result == null) return;
+
+      // If we got an HLS URL, try to fetch and parse quality variants
+      final String? playlistUrl = result.stream.playlist;
+      if (playlistUrl != null && playlistUrl.contains('.m3u8')) {
+        _log('fetching HLS variants from: $playlistUrl');
+        final Map<String, StreamQuality> hlsVariants =
+            await _fetchHlsVariants(playlistUrl);
+        if (hlsVariants.isNotEmpty) {
+          _log('HLS variants parsed: ${hlsVariants.keys.join(',')}');
+          final String defaultQuality = _pickBestQuality(hlsVariants) ?? '';
+          result = StreamResult(
+            sourceId: result.sourceId,
+            sourceName: result.sourceName,
+            embedId: result.embedId,
+            embedName: result.embedName,
+            stream: StreamPlayback(
+              id: result.stream.id,
+              type: result.stream.type,
+              playlist: result.stream.playlist,
+              proxiedPlaylist: result.stream.proxiedPlaylist,
+              playbackUrl: result.stream.playbackUrl,
+              playbackType: result.stream.playbackType,
+              selectedQuality: defaultQuality.isNotEmpty ? defaultQuality : null,
+              qualities: hlsVariants,
+              headers: result.stream.headers,
+              preferredHeaders: result.stream.preferredHeaders,
+              captions: result.stream.captions,
+              flags: result.stream.flags,
+            ),
+          );
+        }
       }
+
+      await finish(result);
     }
 
     final OverlayState overlay = Overlay.of(context, rootOverlay: true);
@@ -267,7 +301,7 @@ class VidlinkScraper {
                     _log('media resource intercepted: $url');
                     final StreamResult result = StreamResult(
                       sourceId: 'vidlink-client',
-                      sourceName: 'VidLink',
+                      sourceName: 'VidLink (Client)',
                       embedId: null,
                       embedName: null,
                       stream: StreamPlayback(
@@ -301,7 +335,7 @@ class VidlinkScraper {
                     _log('onLoadResource media: $url');
                     final StreamResult result = StreamResult(
                       sourceId: 'vidlink-client',
-                      sourceName: 'VidLink',
+                      sourceName: 'VidLink (Client)',
                       embedId: null,
                       embedName: null,
                       stream: StreamPlayback(
@@ -503,6 +537,119 @@ class VidlinkScraper {
       }
     }
     return captions;
+  }
+
+  /// Fetch HLS master playlist and parse quality variants
+  static Future<Map<String, StreamQuality>> _fetchHlsVariants(
+    String m3u8Url,
+  ) async {
+    final Map<String, StreamQuality> result = <String, StreamQuality>{};
+
+    // Try proxy first (bypasses geo/CORS blocks), then direct
+    final String proxyBase = AppConfig.proxyBaseUrl.replaceFirst(':3001', ':3000');
+    String? playlistContent;
+    final List<String> urlsToTry = <String>[
+      '$proxyBase/proxy?url=${Uri.encodeComponent(m3u8Url)}',
+      m3u8Url,
+    ];
+
+    for (final String url in urlsToTry) {
+      try {
+        final Map<String, String> headers = <String, String>{
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+          'Accept': '*/*',
+          'Referer': 'https://vidlink.pro/',
+          'Origin': 'https://vidlink.pro',
+        };
+        final http.Response resp = await http
+            .get(Uri.parse(url), headers: headers)
+            .timeout(const Duration(seconds: 10));
+        if (resp.statusCode >= 200 && resp.statusCode < 300) {
+          playlistContent = resp.body;
+          break;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+
+    if (playlistContent == null) {
+      _log('_fetchHlsVariants: failed to fetch playlist');
+      return result;
+    }
+    _log('_fetchHlsVariants: got playlist, length=${playlistContent.length}');
+
+    // Check if this is a master playlist (has #EXT-X-STREAM-INF)
+    if (!playlistContent.contains('#EXT-X-STREAM-INF')) {
+      _log('_fetchHlsVariants: not a master playlist');
+      return result;
+    }
+
+    // Parse each quality variant
+    final List<String> lines = playlistContent.split('\n');
+    for (int i = 0; i < lines.length; i++) {
+      final String line = lines[i].trim();
+      if (!line.startsWith('#EXT-X-STREAM-INF')) continue;
+
+      // Extract resolution: RESOLUTION=1920x1080
+      final RegExp resRegex = RegExp(r'RESOLUTION=(\d+)x(\d+)');
+      final RegExpMatch? resMatch = resRegex.firstMatch(line);
+      String qualityLabel = '';
+      if (resMatch != null) {
+        final int height = int.tryParse(resMatch.group(2) ?? '0') ?? 0;
+        qualityLabel = '${height}p';
+      }
+
+      // Extract bandwidth
+      final RegExp bwRegex = RegExp(r'BANDWIDTH=(\d+)');
+      final RegExpMatch? bwMatch = bwRegex.firstMatch(line);
+      final int bandwidth = int.tryParse(bwMatch?.group(1) ?? '0') ?? 0;
+
+      // Next non-comment line is the URL
+      String variantUrl = '';
+      for (int j = i + 1; j < lines.length; j++) {
+        final String nextLine = lines[j].trim();
+        if (nextLine.isEmpty || nextLine.startsWith('#')) continue;
+        variantUrl = nextLine;
+        break;
+      }
+
+      if (variantUrl.isEmpty) continue;
+
+      // Resolve relative URLs
+      if (!variantUrl.startsWith('http')) {
+        final Uri baseUri = Uri.parse(m3u8Url);
+        final String basePath = baseUri.path.substring(0, baseUri.path.lastIndexOf('/') + 1);
+        variantUrl = '${baseUri.scheme}://${baseUri.host}$basePath$variantUrl';
+      }
+
+      // Generate quality label from bandwidth if resolution not available
+      if (qualityLabel.isEmpty) {
+        if (bandwidth > 15000000) {
+          qualityLabel = '4K';
+        } else if (bandwidth > 8000000) {
+          qualityLabel = '1440p';
+        } else if (bandwidth > 5000000) {
+          qualityLabel = '1080p';
+        } else if (bandwidth > 2500000) {
+          qualityLabel = '720p';
+        } else if (bandwidth > 1000000) {
+          qualityLabel = '480p';
+        } else {
+          qualityLabel = '360p';
+        }
+      }
+
+      if (qualityLabel.isNotEmpty && variantUrl.isNotEmpty) {
+        result[qualityLabel] = StreamQuality(
+          url: variantUrl,
+          type: 'hls',
+        );
+        _log('variant: $qualityLabel -> $variantUrl');
+      }
+    }
+
+    return result;
   }
 
   static String? _readString(dynamic value) {
