@@ -133,6 +133,15 @@ class SettingsScreen extends ConsumerWidget {
                     },
                   ),
                   const SizedBox(height: AppSpacing.x3),
+                  _HardwareAccelerationTile(
+                    value: ref.watch(hardwareAccelerationPrefProvider),
+                    onChanged: (bool next) async {
+                      await ref
+                          .read(storageControllerProvider)
+                          .setHardwareAccelerationEnabled(next);
+                    },
+                  ),
+                  const SizedBox(height: AppSpacing.x3),
                   _DoubleTapSeekTile(
                     value: ref.watch(doubleTapSeekSecsPrefProvider),
                     onPick: (int picked) async {
@@ -819,6 +828,72 @@ class _SettingsActionTile extends StatelessWidget {
                 style: Theme.of(
                   context,
                 ).textTheme.labelLarge?.copyWith(color: accentColor),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HardwareAccelerationTile extends StatelessWidget {
+  const _HardwareAccelerationTile({required this.value, required this.onChanged});
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.blackC150,
+      borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
+        onTap: () => onChanged(!value),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.x4,
+            vertical: AppSpacing.x3,
+          ),
+          child: Row(
+            children: <Widget>[
+              const Icon(
+                Icons.bolt_rounded,
+                color: AppColors.typeLink,
+              ),
+              const SizedBox(width: AppSpacing.x3),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      'Hardware decoding',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: AppSpacing.x1),
+                    Text(
+                      'Recommended OFF for stable HEVC/H.265 playback. Toggle on only if needed, then restart the player for the change to take effect.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              Switch(
+                value: value,
+                onChanged: onChanged,
+                activeThumbColor: AppColors.typeEmphasis,
+                activeTrackColor: AppColors.buttonsPurple,
+                inactiveThumbColor: AppColors.typeSecondary,
+                inactiveTrackColor: AppColors.dropdownBorder,
+                trackOutlineColor: WidgetStateProperty.resolveWith<Color?>(
+                  (Set<WidgetState> states) {
+                    if (states.contains(WidgetState.selected)) {
+                      return AppColors.buttonsPurple;
+                    }
+                    return AppColors.dropdownBorder;
+                  },
+                ),
               ),
             ],
           ),

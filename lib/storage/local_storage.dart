@@ -20,6 +20,7 @@ class LocalStorage {
   static const String prefKeySubtitleColor = 'pref_subtitle_color';
   static const String prefKeySubtitleBgOpacity = 'pref_subtitle_bg_opacity';
   static const String prefKeyDoubleTapSeekSecs = 'pref_double_tap_seek_secs';
+  static const String prefKeyHardwareAcceleration = 'pref_hardware_acceleration';
 
   static const int doubleTapSeekDefaultSecs = 10;
   static const List<int> doubleTapSeekChoicesSecs = <int>[5, 10, 15, 30, 60];
@@ -361,6 +362,17 @@ class LocalStorage {
         ? value
         : doubleTapSeekDefaultSecs;
     await _prefsBox.put(prefKeyDoubleTapSeekSecs, safe);
+  }
+
+  /// Whether hardware decoding/acceleration is enabled for video playback.
+  /// Defaults to false for first-run stability on HEVC/H.265 streams.
+  static bool getHardwareAccelerationEnabled() {
+    final dynamic raw = _prefsBox.get(prefKeyHardwareAcceleration);
+    return raw is bool ? raw : false;
+  }
+
+  static Future<void> setHardwareAccelerationEnabled(bool value) async {
+    await _prefsBox.put(prefKeyHardwareAcceleration, value);
   }
 
   /// Aggregate watch statistics derived from existing boxes; no extra Hive

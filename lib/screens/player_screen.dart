@@ -143,13 +143,8 @@ class PlayerScreen extends ConsumerStatefulWidget {
 
 class _PlayerScreenState extends ConsumerState<PlayerScreen>
     with WidgetsBindingObserver {
-  late final Player _player = Player(
-    configuration: const PlayerConfiguration(
-      title: 'Veil',
-      bufferSize: 64 * 1024 * 1024,
-    ),
-  );
-  late final VideoController _videoController = VideoController(_player);
+  late final Player _player;
+  late final VideoController _videoController;
 
   final List<StreamSubscription<dynamic>> _subscriptions =
       <StreamSubscription<dynamic>>[];
@@ -184,6 +179,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _subtitlesEnabled = false;
   bool _resumeApplied = false;
   bool _playerReady = false;
+  bool _openingStream = false;
   bool _hasPlaybackError = false;
   bool _sourceSwitching = false;
   String? _pendingSourceId;
@@ -240,6 +236,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _omssResponse,
       _activeSource,
     );
+
+    final bool enableHw = ref.read(hardwareAccelerationPrefProvider);
+    _player = Player(
+      configuration: const PlayerConfiguration(
+        title: 'Veil',
+        bufferSize: 64 * 1024 * 1024,
+      ),
+    );
+    _videoController = VideoController(
+      _player,
+      configuration: VideoControllerConfiguration(
+        enableHardwareAcceleration: enableHw,
+      ),
+    );
+
     _applyUserPlaybackPrefs();
     _applyPlayerChrome();
     _bindPlayerStreams();
@@ -287,6 +298,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _sourceSwitching = false;
       _pendingSourceId = null;
       _pendingSourceLabel = null;
+      _openingStream = false;
       _playerReady = false;
       _hasPlaybackError = false;
       _playbackError = null;
@@ -903,6 +915,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           _buffering = value;
         });
       }),
+      _player.stream.error.listen((String value) {
+        if (!mounted || value.trim().isEmpty) {
+          return;
+        }
+        setState(() {
+          _openingStream = false;
+          _hasPlaybackError = true;
+          _playerReady = false;
+          _buffering = false;
+          _playbackError = value;
+          _controlsLocked = false;
+          _controlsVisible = true;
+        });
+      }),
     ]);
   }
 
@@ -918,6 +944,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return;
       }
       setState(() {
+        _openingStream = false;
         _hasPlaybackError = true;
         _playerReady = false;
         _buffering = false;
@@ -932,6 +959,34 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
       _resumeApplied = false;
       final int? resumeStartSec = _resolvedResumeFrom;
+
+      if (mounted) {
+        setState(() {
+          _openingStream = true;
+          _playerReady = false;
+          _hasPlaybackError = false;
+          _playbackError = null;
+          _buffering = true;
+          _controlsLocked = false;
+          _controlsVisible = true;
+        });
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted) {
+          return;
+        }
+      }
+
+      // Set native hwdec before open so libmpv does not select a stale decoder.
+      final PlatformPlayer? platform = _player.platform;
+      if (platform is NativePlayer) {
+        final bool enableHw = ref.read(hardwareAccelerationPrefProvider);
+        if (enableHw) {
+          await platform.setProperty('hwdec', 'mediacodec');
+        } else {
+          await platform.setProperty('hwdec', 'no');
+        }
+      }
+
       await _player.open(
         Media(
           url,
@@ -950,8 +1005,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return;
       }
       setState(() {
+        _openingStream = false;
         _playerReady = true;
         _hasPlaybackError = false;
+        _buffering = false;
         _playbackError = null;
       });
     } catch (error) {
@@ -959,6 +1016,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return;
       }
       setState(() {
+        _openingStream = false;
         _hasPlaybackError = true;
         _playerReady = false;
         _buffering = false;
@@ -1153,6 +1211,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _showControls();
   }
 
+  void _exitPlayer() {
+    final NavigatorState navigator = Navigator.of(context);
+    unawaited(_persistProgress());
+    unawaited(navigator.maybePop());
+  }
+
   Future<void> _seekRelative(int seconds, {bool showControls = true}) async {
     final int targetMs =
         ((_position.inMilliseconds + (seconds * 1000)).clamp(
@@ -1197,6 +1261,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _controlsHideTimer?.cancel();
     _controlsHideTimer = Timer(const Duration(seconds: 3), () {
       if (!mounted) {
+        return;
+      }
+      if (!_playerReady ||
+          _openingStream ||
+          _hasPlaybackError ||
+          _sourceSwitching) {
         return;
       }
       setState(() {
@@ -2055,6 +2125,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (_controlsLocked) {
       return;
     }
+    if (!_playerReady ||
+        _openingStream ||
+        _hasPlaybackError ||
+        _sourceSwitching) {
+      setState(() {
+        _controlsVisible = true;
+      });
+      return;
+    }
     setState(() {
       _controlsVisible = !_controlsVisible;
     });
@@ -2150,7 +2229,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   void _onVerticalDragStart(DragStartDetails details) {
     // Locked: no brightness/volume edge-swipe gestures either.
-    if (_controlsLocked) {
+    if (_controlsLocked || !_playerReady) {
       _edgeSwipe = _PlayerEdgeSwipe.none;
       return;
     }
@@ -2536,7 +2615,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 _PlayerBackdrop(mediaItem: widget.args.mediaItem),
                 Positioned.fill(
                   child: IgnorePointer(
-                    child: _playerReady
+                    child: (_playerReady || _openingStream)
                         ? Video(
                             controller: _videoController,
                             controls: NoVideoControls,
@@ -2691,14 +2770,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   buffered: _buffer,
                   showNextEpisode: _shouldShowNextEpisode,
                   nextEpisodeLabel: _nextEpisodeTarget?.label,
-                  onBack: () async {
-                    final NavigatorState navigator = Navigator.of(context);
-                    await _persistProgress();
-                    if (!mounted) {
-                      return;
-                    }
-                    await navigator.maybePop();
-                  },
+                  onBack: _exitPlayer,
                   onPlayPause: _togglePlayback,
                   onSeekBack: () => _seekRelative(-10),
                   onSeekForward: () => _seekRelative(10),

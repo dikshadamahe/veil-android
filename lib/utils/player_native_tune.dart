@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:pstream_android/storage/local_storage.dart';
 
 /// Optional libmpv tuning for Android native [Player] (playback parity / headroom).
 ///
@@ -15,6 +16,8 @@ Future<void> applyNativePlaybackTune(Player player) async {
   try {
     await platform.setProperty('volume-max', '150');
     await platform.setProperty('demuxer-readahead-secs', '20');
+    final bool enableHw = LocalStorage.getHardwareAccelerationEnabled();
+    await platform.setProperty('hwdec', enableHw ? 'mediacodec' : 'no');
   } catch (error, stackTrace) {
     debugPrint('applyNativePlaybackTune: $error\n$stackTrace');
   }
