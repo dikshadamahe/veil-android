@@ -153,6 +153,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   String? _subtitleToast;
   Timer? _subtitleToastTimer;
   Timer? _gestureHintTimer;
+  int _playerLogSeq = 0;
+  int _lastLoggedPositionBucket = -1;
+  int _lastLoggedBufferBucket = -1;
 
   /// Drives [ValueListenableBuilder] around the open player settings sheet.
   /// Modal routes do not rebuild when this screen [setState]s, so the
@@ -224,6 +227,67 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// top-right is the only affordance until the user taps it.
   bool _controlsLocked = false;
 
+  void _debugPlayer(String event, [Map<String, Object?> data = const {}]) {
+    final Map<String, Object?> fields = <String, Object?>{
+      'ready': _playerReady,
+      'opening': _openingStream,
+      'buffering': _buffering,
+      'playing': _playing,
+      'pos': _position.inSeconds,
+      'dur': _duration.inSeconds,
+      'buf': _buffer.inSeconds,
+      ...data,
+      ..._debugPlayerStateSnapshot(),
+    };
+    final String payload = fields.entries
+        .map((MapEntry<String, Object?> entry) {
+          return '${entry.key}=${entry.value}';
+        })
+        .join(' ');
+    _playerLogSeq += 1;
+    debugPrint('[VEIL_PLAYER] #$_playerLogSeq $event $payload');
+  }
+
+  Map<String, Object?> _debugPlayerStateSnapshot() {
+    try {
+      final state = _player.state;
+      return <String, Object?>{
+        'statePlaying': state.playing,
+        'stateBuffering': state.buffering,
+        'bufferPct': state.bufferingPercentage.toStringAsFixed(1),
+        'videoSize': '${state.width ?? 0}x${state.height ?? 0}',
+        'videoTracks': state.tracks.video.length,
+        'audioTracks': state.tracks.audio.length,
+        'subtitleTracks': state.tracks.subtitle.length,
+      };
+    } catch (_) {
+      return const <String, Object?>{'state': 'unavailable'};
+    }
+  }
+
+  String _debugUrl(String? url) {
+    if (url == null || url.isEmpty) {
+      return 'empty';
+    }
+    final Uri? uri = Uri.tryParse(url);
+    if (uri == null) {
+      return 'invalid len=${url.length}';
+    }
+    final String queryKeys = uri.queryParameters.keys.join(',');
+    return '${uri.scheme}://${uri.host}${uri.path} '
+        'queryKeys=[$queryKeys] len=${url.length}';
+  }
+
+  Map<String, Object?> _debugSourceFields() {
+    return <String, Object?>{
+      'provider': _activeSource.providerName,
+      'providerId': _activeSource.providerId,
+      'sourceType': _activeSource.type,
+      'sourceQuality': _activeSource.quality ?? 'unknown',
+      'selectedQuality': _selectedQualityKey ?? 'auto',
+    };
+  }
+
   @override
   void initState() {
     super.initState();
@@ -250,6 +314,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         enableHardwareAcceleration: enableHw,
       ),
     );
+    _debugPlayer('init', <String, Object?>{
+      'hardwarePref': enableHw,
+      'media': widget.args.mediaItem.hiveKey(),
+      ..._debugSourceFields(),
+    });
 
     _applyUserPlaybackPrefs();
     _applyPlayerChrome();
@@ -288,6 +357,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (!mounted) {
       return;
     }
+    _debugPlayer('reload.begin', <String, Object?>{
+      ..._debugSourceFields(),
+    });
     _playerSettingsLabelRev.value++;
     final int resume = _position.inSeconds;
     await _persistProgress();
@@ -330,11 +402,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     await _openStream(resumeFrom: resume > 0 ? resume : null);
     if (mounted) {
       _playerSettingsLabelRev.value++;
+      _debugPlayer('reload.done');
     }
   }
 
   @override
   void dispose() {
+    _debugPlayer('dispose.begin');
     WidgetsBinding.instance.removeObserver(this);
     // Capture before subscriptions/player tear-down so async persist does not
     // read mpv state after [Player.dispose] (race that dropped progress).
@@ -825,6 +899,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _debugPlayer('lifecycle', <String, Object?>{'state': state.name});
     switch (state) {
       // Do not treat [inactive] as background: opening the notification shade,
       // volume HUD, or brief focus loss fires [inactive] then [resumed] without
@@ -857,6 +932,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         if (!mounted) {
           return;
         }
+        final int bucket = value.inSeconds ~/ 5;
+        if (bucket != _lastLoggedPositionBucket) {
+          _lastLoggedPositionBucket = bucket;
+          _debugPlayer('stream.position', <String, Object?>{
+            'eventPos': value.inSeconds,
+          });
+        }
         // libmpv emits position ~4×/s. Skip the [setState] (and the entire
         // controls-overlay rebuild) while the chrome is hidden — the value
         // is still cached for the next time controls are shown / progress
@@ -873,6 +955,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         if (!mounted) {
           return;
         }
+        _debugPlayer('stream.duration', <String, Object?>{
+          'eventDur': value.inSeconds,
+        });
         setState(() {
           _duration = value;
         });
@@ -888,6 +973,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         if (!mounted) {
           return;
         }
+        final int bucket = value.inSeconds ~/ 5;
+        if (bucket != _lastLoggedBufferBucket) {
+          _lastLoggedBufferBucket = bucket;
+          _debugPlayer('stream.buffer', <String, Object?>{
+            'eventBuf': value.inSeconds,
+          });
+        }
         if (!_controlsVisible) {
           _buffer = value;
           return;
@@ -900,6 +992,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         if (!mounted) {
           return;
         }
+        _debugPlayer('stream.playing', <String, Object?>{'eventPlaying': value});
         setState(() {
           _playing = value;
         });
@@ -911,6 +1004,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         if (!mounted) {
           return;
         }
+        _debugPlayer(
+          'stream.buffering',
+          <String, Object?>{'eventBuffering': value},
+        );
         setState(() {
           _buffering = value;
         });
@@ -919,6 +1016,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         if (!mounted || value.trim().isEmpty) {
           return;
         }
+        _debugPlayer('stream.error', <String, Object?>{'error': value});
         setState(() {
           _openingStream = false;
           _hasPlaybackError = true;
@@ -940,6 +1038,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     const Map<String, String> headers = <String, String>{};
 
     if (url == null || url.isEmpty) {
+      _debugPlayer('open.no_url', _debugSourceFields());
       if (!mounted) {
         return;
       }
@@ -954,11 +1053,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
 
     try {
+      final Stopwatch openWatch = Stopwatch()..start();
       if (resumeFrom != null && resumeFrom > 0) {
         _resumeFromOverride = resumeFrom;
       }
       _resumeApplied = false;
       final int? resumeStartSec = _resolvedResumeFrom;
+      final bool enableHw = ref.read(hardwareAccelerationPrefProvider);
+      _debugPlayer('open.begin', <String, Object?>{
+        'resumeFromArg': resumeFrom ?? 0,
+        'resumeStart': resumeStartSec ?? 0,
+        'hardwarePref': enableHw,
+        'url': _debugUrl(url),
+        ..._debugSourceFields(),
+      });
 
       if (mounted) {
         setState(() {
@@ -970,7 +1078,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           _controlsLocked = false;
           _controlsVisible = true;
         });
+        _debugPlayer('open.surface_requested');
         await WidgetsBinding.instance.endOfFrame;
+        _debugPlayer('open.surface_frame_complete');
         if (!mounted) {
           return;
         }
@@ -979,12 +1089,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       // Set native hwdec before open so libmpv does not select a stale decoder.
       final PlatformPlayer? platform = _player.platform;
       if (platform is NativePlayer) {
-        final bool enableHw = ref.read(hardwareAccelerationPrefProvider);
         if (enableHw) {
           await platform.setProperty('hwdec', 'mediacodec');
         } else {
           await platform.setProperty('hwdec', 'no');
         }
+        _debugPlayer('open.hwdec_set', <String, Object?>{
+          'hwdec': enableHw ? 'mediacodec' : 'no',
+        });
+      } else {
+        _debugPlayer('open.hwdec_skipped', <String, Object?>{
+          'platform': platform.runtimeType,
+        });
       }
 
       await _player.open(
@@ -996,9 +1112,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               : null,
         ),
       );
+      _debugPlayer('open.player_open_returned', <String, Object?>{
+        'elapsedMs': openWatch.elapsedMilliseconds,
+      });
       await applyNativePlaybackTune(_player);
+      _debugPlayer('open.native_tune_done', <String, Object?>{
+        'elapsedMs': openWatch.elapsedMilliseconds,
+      });
       await _applyNativeSubtitleStyleFromPrefs();
+      _debugPlayer('open.subtitle_style_done', <String, Object?>{
+        'elapsedMs': openWatch.elapsedMilliseconds,
+      });
       await _player.setVolume(_softwareVolume);
+      _debugPlayer('open.volume_done', <String, Object?>{
+        'volume': _softwareVolume.round(),
+        'elapsedMs': openWatch.elapsedMilliseconds,
+      });
       // Load subtitle asynchronously — do not block video ready state.
       unawaited(_applySelectedSubtitleTrack());
       if (!mounted) {
@@ -1011,7 +1140,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _buffering = false;
         _playbackError = null;
       });
+      _debugPlayer('open.ready', <String, Object?>{
+        'elapsedMs': openWatch.elapsedMilliseconds,
+      });
     } catch (error) {
+      _debugPlayer('open.catch', <String, Object?>{'error': '$error'});
       if (!mounted) {
         return;
       }
@@ -1157,8 +1290,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<void> _recoverFromBackground() async {
+    _debugPlayer('recover.begin', <String, Object?>{
+      'wasBackgrounded': _wasBackgrounded,
+    });
     await _applyPlayerChrome();
     if (!_wasBackgrounded || !mounted) {
+      _debugPlayer('recover.skip');
       return;
     }
 
@@ -1167,6 +1304,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     await _openStream(resumeFrom: _position.inSeconds);
     if (mounted) {
       setState(() {});
+      _debugPlayer('recover.done');
     }
   }
 
@@ -1203,15 +1341,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<void> _togglePlayback() async {
+    _debugPlayer('play_toggle.begin', <String, Object?>{
+      'wasPlaying': _playing,
+    });
     if (_playing) {
       await _player.pause();
+      _debugPlayer('play_toggle.pause_sent');
     } else {
       await _player.play();
+      _debugPlayer('play_toggle.play_sent');
     }
     _showControls();
   }
 
   void _exitPlayer() {
+    _debugPlayer('exit.begin');
     final NavigatorState navigator = Navigator.of(context);
     unawaited(_persistProgress());
     unawaited(navigator.maybePop());
