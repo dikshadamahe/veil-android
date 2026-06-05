@@ -69,6 +69,9 @@ class PlayerScreenArgs {
     this.seasonTitle,
     this.resumeFrom,
     this.replaceEpoch,
+    this.preservedCaption,
+    this.preservedExternalOfferId,
+    this.preservedExternalSummary,
   }) : _initialSourceIndex = initialSourceIndex;
 
   final MediaItem mediaItem;
@@ -92,6 +95,12 @@ class PlayerScreenArgs {
   /// Bumps on each [context.go] to `/player` so the route [ValueKey] changes
   /// even when the server returns the same source for a fresh OMSS fetch.
   final int? replaceEpoch;
+
+  /// Subtitle state preserved across source switches so the user does not
+  /// lose their active track when changing provider.
+  final StreamCaption? preservedCaption;
+  final String? preservedExternalOfferId;
+  final String? preservedExternalSummary;
 
   /// The [OmssSource] the player should open with. Computed once at
   /// construction; the source sheet may swap to a different source by
@@ -189,6 +198,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   String? _selectedQualityKey;
   String? _selectedQualityUrl;
   StreamCaption? _selectedCaption;
+
+  /// In-memory cache: resolved subtitle URL → `file://…` path written to
+  /// temp storage. Avoids re-downloading the same track on source switches.
+  final Map<String, String> _subtitleUrlCache = <String, String>{};
+
   late final StorageController _storageController;
   late final StreamService _streamService;
 
@@ -277,8 +291,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _hasPlaybackError = false;
       _playbackError = null;
       _buffering = true;
-      _activeExternalOfferId = null;
-      _activeExternalSummary = null;
+      // Restore subtitle state from the preserved args so the user keeps
+      // their active track across source switches.
+      _activeExternalOfferId = widget.args.preservedExternalOfferId;
+      _activeExternalSummary = widget.args.preservedExternalSummary;
       // Resync the synthesized stream result from the new args.
       _activeSource = widget.args.initialSource;
       _activeStreamResult = _synthesizeStreamResult(
@@ -288,7 +304,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     });
     _resumeFromOverride = resume > 0 ? resume : null;
     _resumeApplied = false;
-    _selectedCaption = null;
+    _selectedCaption = widget.args.preservedCaption;
+    _subtitlesEnabled = (_selectedCaption != null ||
+        _activeExternalOfferId != null);
     if (LocalStorage.getQualityCap() == LocalStorage.qualityCapAuto) {
       _selectedQualityKey = null;
       _selectedQualityUrl = null;
@@ -712,6 +730,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         language: caption.language ?? 'unknown',
       );
     }
+    // Return from in-memory cache if this URL was already downloaded.
+    final String cacheKey = resolved.toString();
+    if (_subtitleUrlCache.containsKey(cacheKey)) {
+      return SubtitleTrack.uri(
+        _subtitleUrlCache[cacheKey]!,
+        title: caption.label ?? caption.language ?? 'Subtitles',
+        language: caption.language ?? 'unknown',
+      );
+    }
     final Map<String, String> headers =
         _mergedSubtitleRequestHeaders(caption, playback);
     try {
@@ -725,6 +752,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           bytes: r.bodyBytes,
         );
         if (path != null) {
+          _subtitleUrlCache[cacheKey] = 'file://$path';
           return SubtitleTrack.uri(
             'file://$path',
             title: caption.label ?? caption.language ?? 'Subtitles',
@@ -916,7 +944,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       await applyNativePlaybackTune(_player);
       await _applyNativeSubtitleStyleFromPrefs();
       await _player.setVolume(_softwareVolume);
-      await _applySelectedSubtitleTrack();
+      // Load subtitle asynchronously — do not block video ready state.
+      unawaited(_applySelectedSubtitleTrack());
       if (!mounted) {
         return;
       }
@@ -938,6 +967,34 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  /// Map common English language names (as emitted by OMSS labels) to
+  /// BCP-47 primary subtags. Also passes through raw 2/3-letter codes.
+  static String? _languageCodeFromLabel(String? label) {
+    if (label == null || label.trim().isEmpty) {
+      return null;
+    }
+    final String l = label.trim().toLowerCase();
+    // Handle "English (SDH)", "English [CC]" etc.
+    final String base = l.replaceAll(RegExp(r'[\(\[].*'), '').trim();
+    const Map<String, String> table = <String, String>{
+      'english': 'en', 'spanish': 'es', 'french': 'fr',
+      'german': 'de', 'italian': 'it', 'portuguese': 'pt',
+      'dutch': 'nl', 'russian': 'ru', 'japanese': 'ja',
+      'korean': 'ko', 'chinese': 'zh', 'arabic': 'ar',
+      'hindi': 'hi', 'turkish': 'tr', 'polish': 'pl',
+      'swedish': 'sv', 'norwegian': 'no', 'danish': 'da',
+      'finnish': 'fi', 'greek': 'el', 'hebrew': 'he',
+      'romanian': 'ro', 'czech': 'cs', 'hungarian': 'hu',
+      'thai': 'th', 'vietnamese': 'vi', 'indonesian': 'id',
+      'malay': 'ms', 'ukrainian': 'uk', 'bulgarian': 'bg',
+    };
+    // Also handle 2/3-letter codes passed directly.
+    if (base.length == 2 || base.length == 3) {
+      return base;
+    }
+    return table[base];
+  }
+
   /// Builds the [StreamResult] the rest of the player reads from, given
   /// the active [OmssSource] and the surrounding [OmssResponse]. The
   /// player's deep subtitle / quality / caption code is built around
@@ -956,7 +1013,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         .map((OmssSubtitle s) {
           return StreamCaption(
             url: s.url,
-            language: null,
+            language: _languageCodeFromLabel(s.label),
             type: s.format,
             label: s.label,
             raw: <String, dynamic>{
@@ -2808,6 +2865,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         seasonTitle: widget.args.seasonTitle,
         resumeFrom: _position.inSeconds,
         replaceEpoch: epoch,
+        preservedCaption: _selectedCaption,
+        preservedExternalOfferId: _activeExternalOfferId,
+        preservedExternalSummary: _activeExternalSummary,
       ),
     );
   }

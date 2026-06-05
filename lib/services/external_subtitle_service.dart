@@ -14,7 +14,7 @@ class ExternalSubtitleService {
   const ExternalSubtitleService();
 
   static final Uri _wyzieSearch = Uri.parse('https://sub.wyzie.io/search');
-  static final Uri _vdrkSearch = Uri.parse('https://sub.vdrk.site/v1/movie');
+  static final Uri _vdrkBase = Uri.parse('https://sub.vdrk.site/v1');
   static final Uri _osBase = Uri.parse('https://api.opensubtitles.com/api/v1');
 
   static String? _osBearer;
@@ -67,9 +67,9 @@ class ExternalSubtitleService {
       }));
     }
 
-    // VDRK subtitle search - works for movies only (no season/episode support)
-    if (!media.isShow) {
-      futures.add(_searchVdrk('${media.tmdbId}').then((List<ExternalSubtitleOffer> results) {
+    // VDRK subtitle search — movies and TV (season/episode required for TV)
+    if (!media.isShow || (season != null && episode != null)) {
+      futures.add(_searchVdrk(media, season, episode).then((List<ExternalSubtitleOffer> results) {
         out.addAll(results);
       }).catchError((Object e) {
         errors.add('VDRK: $e');
@@ -329,9 +329,18 @@ class ExternalSubtitleService {
     return offers;
   }
 
-  /// VDRK subtitle search - simple API: sub.vdrk.site/v1/movie/{tmdbId}
-  Future<List<ExternalSubtitleOffer>> _searchVdrk(String tmdbId) async {
-    final Uri uri = _vdrkSearch.replace(path: '${_vdrkSearch.path}/$tmdbId');
+  /// VDRK subtitle search.
+  ///   Movie: sub.vdrk.site/v1/movie/{tmdbId}
+  ///   TV:    sub.vdrk.site/v1/tv/{tmdbId}/{season}/{episode}
+  Future<List<ExternalSubtitleOffer>> _searchVdrk(
+    MediaItem media,
+    int? season,
+    int? episode,
+  ) async {
+    final String path = media.isShow && season != null && episode != null
+        ? '${_vdrkBase.path}/tv/${media.tmdbId}/$season/$episode'
+        : '${_vdrkBase.path}/movie/${media.tmdbId}';
+    final Uri uri = _vdrkBase.replace(path: path);
 
     final http.Response response = await _getIdempotentWithRetry(
       uri,
