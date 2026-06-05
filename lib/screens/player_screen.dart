@@ -3139,78 +3139,174 @@ class _SourcesCatalogSheet extends StatelessWidget {
               final OmssSource source = sources[index];
               final bool isCurrent = source.providerId == currentSourceId;
               final bool isSwitching = source.providerId == switchingSourceId;
-              return Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: isSwitching ? null : () => onPick(source),
+              return DecoratedBox(
+                decoration: BoxDecoration(
+                  color: isCurrent
+                      ? AppColors.selectedGlow
+                      : AppColors.transparent,
                   borderRadius: BorderRadius.circular(AppSpacing.x4),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.x2,
-                      vertical: AppSpacing.x3,
-                    ),
-                    child: Row(
-                      children: <Widget>[
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Text(
-                                source.providerName,
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleMedium
-                                    ?.copyWith(
-                                      color: isCurrent
-                                          ? AppColors.typeEmphasis
-                                          : AppColors.typeText,
-                                    ),
+                  border: isCurrent
+                      ? Border.all(color: AppColors.glassCardBorder)
+                      : null,
+                ),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: isSwitching ? null : () => onPick(source),
+                    borderRadius: BorderRadius.circular(AppSpacing.x4),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.x2,
+                        vertical: AppSpacing.x3,
+                      ),
+                      child: Row(
+                        children: <Widget>[
+                          if (isCurrent)
+                            Container(
+                              width: 3,
+                              height: AppSpacing.x6,
+                              margin: const EdgeInsets.only(
+                                right: AppSpacing.x2,
                               ),
-                              const SizedBox(height: AppSpacing.x1),
-                              Text(
-                                _subtitleFor(source),
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .labelSmall
-                                    ?.copyWith(color: AppColors.typeSecondary),
+                              decoration: BoxDecoration(
+                                color: AppColors.purpleC200,
+                                borderRadius: BorderRadius.circular(2),
                               ),
-                              if (isSwitching)
+                            ),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
                                 Text(
-                                  'Switching...',
+                                  source.providerName,
                                   style: Theme.of(context)
                                       .textTheme
-                                      .labelSmall
-                                      ?.copyWith(color: AppColors.typeSecondary),
-                                )
-                              else if (isCurrent)
-                                Text(
-                                  'Now playing',
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .labelSmall
-                                      ?.copyWith(color: AppColors.typeSecondary),
+                                      .titleMedium
+                                      ?.copyWith(
+                                        color: isCurrent
+                                            ? AppColors.typeEmphasis
+                                            : AppColors.typeText,
+                                        fontWeight: isCurrent
+                                            ? FontWeight.w700
+                                            : FontWeight.w600,
+                                      ),
                                 ),
-                            ],
-                          ),
-                        ),
-                        if (isSwitching)
-                          const Padding(
-                            padding: EdgeInsets.only(right: AppSpacing.x2),
-                            child: SizedBox(
-                              width: AppSpacing.x5,
-                              height: AppSpacing.x5,
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                                const SizedBox(height: AppSpacing.x1),
+                                Row(
+                                  children: <Widget>[
+                                    // Quality pill badge
+                                    if (source.quality != null &&
+                                        source.quality!.isNotEmpty)
+                                      Container(
+                                        margin: const EdgeInsets.only(
+                                          right: AppSpacing.x2,
+                                        ),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: AppSpacing.x2,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: AppColors.purpleC600
+                                              .withValues(alpha: 0.2),
+                                          borderRadius:
+                                              BorderRadius.circular(
+                                            AppSpacing.x2,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          source.quality!.toUpperCase(),
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .labelSmall
+                                              ?.copyWith(
+                                                color: AppColors.purpleC100,
+                                                fontWeight: FontWeight.w700,
+                                                letterSpacing: 0.5,
+                                              ),
+                                        ),
+                                      ),
+                                    // Type pill badge
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: AppSpacing.x2,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: AppColors.blackC125
+                                            .withValues(alpha: 0.6),
+                                        borderRadius: BorderRadius.circular(
+                                          AppSpacing.x2,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        source.type.toUpperCase(),
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelSmall
+                                            ?.copyWith(
+                                              color: AppColors.typeSecondary,
+                                              letterSpacing: 0.5,
+                                            ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if (isSwitching)
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                      top: AppSpacing.x1,
+                                    ),
+                                    child: Text(
+                                      'Switching...',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: AppColors.typeSecondary,
+                                          ),
+                                    ),
+                                  )
+                                else if (isCurrent)
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                      top: AppSpacing.x1,
+                                    ),
+                                    child: Text(
+                                      'Now playing',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: AppColors.purpleC200,
+                                          ),
+                                    ),
+                                  ),
+                              ],
                             ),
-                          )
-                        else if (isCurrent)
-                          const Padding(
-                            padding: EdgeInsets.only(right: AppSpacing.x2),
-                            child: Icon(
-                              Icons.check_circle_rounded,
-                              color: AppColors.purpleC100,
-                            ),
                           ),
-                      ],
+                          if (isSwitching)
+                            const Padding(
+                              padding:
+                                  EdgeInsets.only(right: AppSpacing.x2),
+                              child: SizedBox(
+                                width: AppSpacing.x5,
+                                height: AppSpacing.x5,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            )
+                          else if (isCurrent)
+                            const Padding(
+                              padding:
+                                  EdgeInsets.only(right: AppSpacing.x2),
+                              child: Icon(
+                                Icons.check_circle_rounded,
+                                color: AppColors.purpleC100,
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -3237,15 +3333,6 @@ class _SourcesCatalogSheet extends StatelessWidget {
       ],
     );
   }
-
-  String _subtitleFor(OmssSource source) {
-    final String type = source.type.toUpperCase();
-    final String? quality = source.quality;
-    if (quality == null || quality.isEmpty) {
-      return type;
-    }
-    return '$quality · $type';
-  }
 }
 
 class _PlayerSheetScaffold extends StatelessWidget {
@@ -3267,9 +3354,16 @@ class _PlayerSheetScaffold extends StatelessWidget {
         ),
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: AppColors.blackC50.withValues(alpha: 0.98),
+            color: AppColors.glassSheet,
             borderRadius: BorderRadius.circular(metrics.sheetRadius),
-            border: Border.all(color: AppColors.videoContextBorder),
+            border: Border.all(color: AppColors.glassBorder),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: AppColors.blackC50.withValues(alpha: 0.45),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(metrics.sheetRadius),
@@ -3441,49 +3535,58 @@ class _PlayerSettingsCard extends StatelessWidget {
     // even when subtitle/source labels wrap to two lines.
     return SizedBox(
       height: metrics.settingsCardHeight,
-      child: Material(
-        color: AppColors.blackC125,
-        borderRadius: BorderRadius.circular(AppSpacing.x4),
-        child: InkWell(
-          onTap: onTap,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: AppColors.glassCard,
           borderRadius: BorderRadius.circular(AppSpacing.x4),
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: metrics.contentPadding,
-              vertical: metrics.contentPadding,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: <Widget>[
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: Text(
-                        title,
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              color: AppColors.typeEmphasis,
-                            ),
+          border: Border.all(color: AppColors.glassCardBorder, width: 0.8),
+        ),
+        child: Material(
+          color: AppColors.transparent,
+          borderRadius: BorderRadius.circular(AppSpacing.x4),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(AppSpacing.x4),
+            hoverColor: AppColors.activeCardTint,
+            splashColor: AppColors.purpleC600.withValues(alpha: 0.15),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: metrics.contentPadding,
+                vertical: metrics.contentPadding,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          title,
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                color: AppColors.typeEmphasis,
+                              ),
+                        ),
                       ),
-                    ),
-                    if (loading)
-                      const SizedBox(
-                        width: AppSpacing.x4,
-                        height: AppSpacing.x4,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: AppSpacing.x1),
-                Text(
-                  subtitle,
-                  maxLines: metrics.settingsSubtitleMaxLines,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: AppColors.typeSecondary,
-                      ),
-                ),
-              ],
+                      if (loading)
+                        const SizedBox(
+                          width: AppSpacing.x4,
+                          height: AppSpacing.x4,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.x1),
+                  Text(
+                    subtitle,
+                    maxLines: metrics.settingsSubtitleMaxLines,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: AppColors.typeSecondary,
+                        ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -3654,51 +3757,70 @@ class _PlayerOptionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final _PlayerSheetMetrics metrics = _PlayerSheetMetrics.of(context);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: selected ? AppColors.selectedGlow : AppColors.transparent,
         borderRadius: BorderRadius.circular(AppSpacing.x4),
-        child: Padding(
-          padding: metrics.optionRowPadding,
-          child: Row(
-            children: <Widget>[
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: selected
-                            ? AppColors.typeEmphasis
-                            : AppColors.typeText,
-                      ),
+        border: selected
+            ? Border.all(color: AppColors.glassCardBorder)
+            : null,
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(AppSpacing.x4),
+          child: Padding(
+            padding: metrics.optionRowPadding,
+            child: Row(
+              children: <Widget>[
+                if (selected)
+                  Container(
+                    width: 3,
+                    height: AppSpacing.x6,
+                    margin: const EdgeInsets.only(right: AppSpacing.x2),
+                    decoration: BoxDecoration(
+                      color: AppColors.purpleC200,
+                      borderRadius: BorderRadius.circular(2),
                     ),
-                    if (subtitle != null) ...<Widget>[
-                      const SizedBox(height: AppSpacing.x1),
+                  ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
                       Text(
-                        subtitle!,
-                        style: Theme.of(context).textTheme.bodySmall,
+                        title,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: selected
+                              ? AppColors.typeEmphasis
+                              : AppColors.typeText,
+                        ),
                       ),
+                      if (subtitle != null) ...<Widget>[
+                        const SizedBox(height: AppSpacing.x1),
+                        Text(
+                          subtitle!,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
                     ],
-                  ],
-                ),
-              ),
-              if (showChevron)
-                const Icon(
-                  Icons.chevron_right_rounded,
-                  color: AppColors.typeSecondary,
-                ),
-              if (selected)
-                const Padding(
-                  padding: EdgeInsets.only(left: AppSpacing.x2),
-                  child: Icon(
-                    Icons.check_circle_rounded,
-                    color: AppColors.purpleC100,
                   ),
                 ),
-            ],
+                if (showChevron)
+                  const Icon(
+                    Icons.chevron_right_rounded,
+                    color: AppColors.typeSecondary,
+                  ),
+                if (selected)
+                  const Padding(
+                    padding: EdgeInsets.only(left: AppSpacing.x2),
+                    child: Icon(
+                      Icons.check_circle_rounded,
+                      color: AppColors.purpleC100,
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),

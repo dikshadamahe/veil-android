@@ -59,10 +59,22 @@ class MediaCard extends ConsumerWidget {
       child: SizedBox(
         width: size.width,
         height: size.height + _titleAreaHeight,
-        child: Material(
-          color: AppColors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(AppSpacing.x4),
+        child: _TapScaleWrapper(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppSpacing.x4),
+              boxShadow: <BoxShadow>[
+                BoxShadow(
+                  color: AppColors.blackC50.withValues(alpha: 0.4),
+                  blurRadius: 10,
+                  offset: const Offset(0, 5),
+                ),
+              ],
+            ),
+            child: Material(
+              color: AppColors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(AppSpacing.x4),
             splashColor: AppColors.mediaCardHoverAccent.withValues(alpha: 0.35),
             highlightColor: AppColors.mediaCardHoverBackground.withValues(
               alpha: 0.35,
@@ -114,17 +126,17 @@ class MediaCard extends ConsumerWidget {
                                   ),
                           ),
                         ),
-                        const DecoratedBox(
+                        DecoratedBox(
                           decoration: BoxDecoration(
                             gradient: LinearGradient(
                               begin: Alignment.topCenter,
                               end: Alignment.bottomCenter,
                               colors: <Color>[
                                 AppColors.transparent,
-                                AppColors.transparent,
-                                AppColors.blackC50,
+                                AppColors.blackC50.withValues(alpha: 0.3),
+                                AppColors.blackC100.withValues(alpha: 0.9),
                               ],
-                              stops: <double>[0.0, 0.5, 1.0],
+                              stops: const <double>[0.0, 0.55, 1.0],
                             ),
                           ),
                         ),
@@ -208,6 +220,8 @@ class MediaCard extends ConsumerWidget {
           ),
         ),
       ),
+      ),
+    ),
     );
   }
 
@@ -324,6 +338,41 @@ class MediaCardSkeleton extends StatelessWidget {
           highlightColor: AppColors.mediaCardHoverAccent,
           child: const ColoredBox(color: AppColors.mediaCardHoverBackground),
         ),
+      ),
+    );
+  }
+}
+
+/// Lightweight tap-scale wrapper: scales to 0.97 on pointer-down, springs
+/// back on release. Uses [TweenAnimationBuilder] so no [AnimationController]
+/// is needed and the widget stays [StatelessWidget]-safe.
+class _TapScaleWrapper extends StatefulWidget {
+  const _TapScaleWrapper({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_TapScaleWrapper> createState() => _TapScaleWrapperState();
+}
+
+class _TapScaleWrapperState extends State<_TapScaleWrapper> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      child: TweenAnimationBuilder<double>(
+        tween: Tween<double>(begin: 1.0, end: _pressed ? 0.97 : 1.0),
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOutCubic,
+        builder: (BuildContext context, double scale, Widget? child) {
+          return Transform.scale(scale: scale, child: child);
+        },
+        child: widget.child,
       ),
     );
   }

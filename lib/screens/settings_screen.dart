@@ -251,12 +251,12 @@ class _SettingsHeroCard extends StatelessWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: <Color>[
-            AppColors.blackC125,
-            AppColors.blackC100,
-            AppColors.purpleC900.withValues(alpha: 0.92),
+            AppColors.blackC125.withValues(alpha: 0.55),
+            AppColors.blackC100.withValues(alpha: 0.55),
+            AppColors.purpleC900.withValues(alpha: 0.72),
           ],
         ),
-        border: Border.all(color: AppColors.settingsCardBorder),
+        border: Border.all(color: AppColors.glassCardBorder, width: 0.8),
       ),
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.x4),
@@ -341,9 +341,9 @@ class _SettingsSection extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: AppColors.settingsCardBackground,
+        color: AppColors.glassCard,
         borderRadius: BorderRadius.circular(AppSpacing.x5),
-        border: Border.all(color: AppColors.settingsCardBorder),
+        border: Border.all(color: AppColors.glassCardBorder, width: 0.8),
       ),
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.x4),

@@ -13,6 +13,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:pstream_android/config/app_theme.dart';
@@ -200,11 +201,66 @@ class _LoadingState extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        const SizedBox(
+        SizedBox(
           width: AppSpacing.x16,
           height: AppSpacing.x16,
           child: RepaintBoundary(
-            child: CircularProgressIndicator(strokeWidth: 3),
+            child: Stack(
+              alignment: Alignment.center,
+              children: <Widget>[
+                // Outer pulse ring 1
+                Container(
+                  width: AppSpacing.x16,
+                  height: AppSpacing.x16,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: AppColors.purpleC200,
+                      width: 2,
+                    ),
+                  ),
+                )
+                    .animate(
+                      onPlay: (AnimationController c) => c.repeat(),
+                    )
+                    .scale(
+                      begin: const Offset(0.85, 0.85),
+                      end: const Offset(1.2, 1.2),
+                      duration: 1600.ms,
+                      curve: Curves.easeInOutCirc,
+                    )
+                    .fadeOut(duration: 1600.ms),
+                // Outer pulse ring 2 (offset start)
+                Container(
+                  width: AppSpacing.x16,
+                  height: AppSpacing.x16,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: AppColors.purpleC100.withValues(alpha: 0.6),
+                      width: 1.5,
+                    ),
+                  ),
+                )
+                    .animate(
+                      onPlay: (AnimationController c) => c.repeat(),
+                    )
+                    .scale(
+                      begin: const Offset(0.85, 0.85),
+                      end: const Offset(1.2, 1.2),
+                      duration: 1600.ms,
+                      delay: 800.ms,
+                      curve: Curves.easeInOutCirc,
+                    )
+                    .fadeOut(duration: 1600.ms, delay: 800.ms),
+                // Center spinner
+                const SizedBox(
+                  width: AppSpacing.x12,
+                  height: AppSpacing.x12,
+                  child: CircularProgressIndicator(strokeWidth: 3),
+                ),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: AppSpacing.x6),

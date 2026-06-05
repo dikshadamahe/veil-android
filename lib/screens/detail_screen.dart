@@ -1,5 +1,6 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:pstream_android/config/app_theme.dart';
@@ -584,7 +585,15 @@ class _DetailBody extends StatelessWidget {
               ),
             ),
           ],
-        ),
+        )
+            .animate()
+            .slideY(
+              begin: 0.15,
+              end: 0.0,
+              duration: 380.ms,
+              curve: Curves.easeOutBack,
+            )
+            .fadeIn(duration: 380.ms),
         const SizedBox(height: AppSpacing.x4),
         GestureDetector(
           onTap: onToggleOverview,

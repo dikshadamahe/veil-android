@@ -255,6 +255,25 @@ class AppColors {
   static const Color videoContextTypeMain = semanticSilverC300;
   static const Color videoContextTypeSecondary = ashC200;
   static const Color videoContextTypeAccent = purpleC200;
+
+  // ── Glass helpers (visual-only, no new hues) ──────────────────────────
+  /// Glass background for stationary surfaces (sheets, nav bar).
+  static Color get glassSheet => blackC50.withValues(alpha: 0.68);
+
+  /// Glass border for stationary surfaces.
+  static Color get glassBorder => white.withValues(alpha: 0.08);
+
+  /// Glass background for scroll-safe cards (no BackdropFilter).
+  static Color get glassCard => blackC125.withValues(alpha: 0.48);
+
+  /// Glass border for scroll-safe cards.
+  static Color get glassCardBorder => white.withValues(alpha: 0.06);
+
+  /// Selected row glow.
+  static Color get selectedGlow => purpleC600.withValues(alpha: 0.08);
+
+  /// Active card tint.
+  static Color get activeCardTint => purpleC600.withValues(alpha: 0.12);
 }
 
 class AppTextStyles {
@@ -267,26 +286,38 @@ class AppTextStyles {
       displayLarge: themed.displayLarge?.copyWith(
         color: AppColors.typeEmphasis,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.45,
+        height: 1.15,
       ),
       displayMedium: themed.displayMedium?.copyWith(
         color: AppColors.typeEmphasis,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.45,
+        height: 1.15,
       ),
       displaySmall: themed.displaySmall?.copyWith(
         color: AppColors.typeEmphasis,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.45,
+        height: 1.15,
       ),
       headlineLarge: themed.headlineLarge?.copyWith(
         color: AppColors.typeEmphasis,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.35,
+        height: 1.15,
       ),
       headlineMedium: themed.headlineMedium?.copyWith(
         color: AppColors.typeEmphasis,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.35,
+        height: 1.15,
       ),
       headlineSmall: themed.headlineSmall?.copyWith(
         color: AppColors.typeEmphasis,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.35,
+        height: 1.15,
       ),
       titleLarge: themed.titleLarge?.copyWith(
         color: AppColors.typeEmphasis,
@@ -300,9 +331,21 @@ class AppTextStyles {
         color: AppColors.typeText,
         fontWeight: FontWeight.w600,
       ),
-      bodyLarge: themed.bodyLarge?.copyWith(color: AppColors.typeText),
-      bodyMedium: themed.bodyMedium?.copyWith(color: AppColors.typeText),
-      bodySmall: themed.bodySmall?.copyWith(color: AppColors.typeSecondary),
+      bodyLarge: themed.bodyLarge?.copyWith(
+        color: AppColors.typeText,
+        height: 1.45,
+        letterSpacing: 0.15,
+      ),
+      bodyMedium: themed.bodyMedium?.copyWith(
+        color: AppColors.typeText,
+        height: 1.45,
+        letterSpacing: 0.15,
+      ),
+      bodySmall: themed.bodySmall?.copyWith(
+        color: AppColors.typeSecondary,
+        height: 1.45,
+        letterSpacing: 0.15,
+      ),
       labelLarge: themed.labelLarge?.copyWith(
         color: AppColors.typeEmphasis,
         fontWeight: FontWeight.w600,

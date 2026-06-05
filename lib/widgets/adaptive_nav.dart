@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 
 import '../config/app_theme.dart';
@@ -58,30 +60,47 @@ class AdaptiveNav extends StatelessWidget {
             dockHorizontal,
             AppSpacing.x3,
           ),
-          child: Material(
-            color: AppColors.blackC100,
-            elevation: 6,
-            shadowColor: AppColors.blackC50,
-            borderRadius: BorderRadius.circular(AppSpacing.x8),
-            clipBehavior: Clip.antiAlias,
-            child: NavigationBar(
-              height: 64,
-              backgroundColor: AppColors.blackC100,
-              surfaceTintColor: AppColors.transparent,
-              indicatorColor: AppColors.purpleC600.withValues(alpha: 0.35),
-              selectedIndex: currentIndex,
-              onDestinationSelected: onDestinationSelected,
-              labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-              destinations: _destinations.asMap().entries.map(
-                (MapEntry<int, _AdaptiveNavDestination> e) {
-                  final bool selected = currentIndex == e.key;
-                  return NavigationDestination(
-                    icon: Icon(e.value.icon),
-                    selectedIcon: Icon(e.value.resolvedIcon(selected)),
-                    label: e.value.label,
-                  );
-                },
-              ).toList(growable: false),
+          child: RepaintBoundary(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(AppSpacing.x8),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: AppColors.glassSheet,
+                    borderRadius: BorderRadius.circular(AppSpacing.x8),
+                    border: Border.all(
+                      color: AppColors.glassBorder,
+                    ),
+                    boxShadow: <BoxShadow>[
+                      BoxShadow(
+                        color: AppColors.blackC50.withValues(alpha: 0.5),
+                        blurRadius: 12,
+                        offset: const Offset(0, -2),
+                      ),
+                    ],
+                  ),
+                  child: NavigationBar(
+                    height: 64,
+                    backgroundColor: AppColors.transparent,
+                    surfaceTintColor: AppColors.transparent,
+                    indicatorColor: AppColors.purpleC600.withValues(alpha: 0.35),
+                    selectedIndex: currentIndex,
+                    onDestinationSelected: onDestinationSelected,
+                    labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+                    destinations: _destinations.asMap().entries.map(
+                      (MapEntry<int, _AdaptiveNavDestination> e) {
+                        final bool selected = currentIndex == e.key;
+                        return NavigationDestination(
+                          icon: Icon(e.value.icon),
+                          selectedIcon: Icon(e.value.resolvedIcon(selected)),
+                          label: e.value.label,
+                        );
+                      },
+                    ).toList(growable: false),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
