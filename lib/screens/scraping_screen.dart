@@ -1,21 +1,26 @@
+// ScrapingScreen — a thin, transparent loading gate.
+//
+// cinepro-org/core returns every playable source for a title in a single
+// HTTP GET (`/v1/movies/{tmdbId}` or `/v1/tv/{id}/seasons/{s}/episodes/{e}`).
+// The old multi-phase cascade (client-side WebView scrapers, then XPrime,
+// then per-source blocking scrape, then SSE) is gone. This screen now:
+//   1. Issues the single OMSS request on `initState`.
+//   2. On success, pushes `/player` with the full OmssResponse.
+//   3. On failure, shows a "Couldn't find sources" error state with
+//      Try Again / Back actions.
+
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/config/app_theme.dart';
 import 'package:pstream_android/models/media_item.dart';
-import 'package:pstream_android/models/scrape_event.dart';
-import 'package:pstream_android/models/stream_result.dart';
+import 'package:pstream_android/models/omss_source.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/screens/player_screen.dart';
 import 'package:pstream_android/services/stream_service.dart';
-import 'package:pstream_android/services/vidlink_scraper.dart';
-import 'package:pstream_android/services/vidsrc_scraper.dart';
-import 'package:pstream_android/services/xprime_scraper.dart';
-import 'package:pstream_android/widgets/scrape_source_card.dart'
-    show ScrapeSourceCard, ScrapeStatus, StatusCircle;
 
 class ScrapingScreenArgs {
   const ScrapingScreenArgs({
@@ -62,755 +67,39 @@ class ScrapingScreen extends ConsumerStatefulWidget {
 }
 
 class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
-  final ScrollController _scrollController = ScrollController();
-  final Map<String, ScrapeStatus> _statuses = <String, ScrapeStatus>{};
-  final Map<String, _ScrapeNode> _nodes = <String, _ScrapeNode>{};
-  final List<String> _sourceOrder = <String>[];
-  final Map<String, String> _embedNameByScraperId = <String, String>{};
-
-  StreamSubscription<ScrapeEvent>? _scrapeSubscription;
   late final StreamService _streamService;
-  late final XprimeScraper _xprimeScraper;
-  late final VidlinkScraper _vidlinkScraper;
-  late final VidsrcScraper _vidsrcScraper;
-  bool _isLoading = true;
-  bool _allFailure = false;
-  String? _failureMessage;
-  String? _currentPendingSourceId;
-
-  String get _scrapeMediaType => widget.mediaItem.isShow ? 'show' : 'movie';
+  Future<OmssResponse>? _request;
 
   @override
   void initState() {
     super.initState();
     _streamService = ref.read(streamServiceProvider);
-    _xprimeScraper = const XprimeScraper();
-    _vidlinkScraper = const VidlinkScraper();
-    _vidsrcScraper = const VidsrcScraper();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _startInitialScrapeSequence();
-      unawaited(_primeCatalog());
-    });
+    _request = _fetch();
   }
 
-  @override
-  void dispose() {
-    _scrapeSubscription?.cancel();
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _primeCatalog() async {
-    await _fetchAndApplyCatalog();
-  }
-
-  /// [SnackBar] without holding [BuildContext] across an async gap.
-  void _showSnackBarIfMounted(String message) {
-    if (!context.mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
+  Future<OmssResponse> _fetch() {
+    return _streamService.fetchSources(
+      widget.mediaItem,
+      season: widget.season,
+      episode: widget.episode,
     );
   }
 
-  /// GET /sources on providers-api. Returns **null** if at least one source id
-  /// was merged; otherwise an error string for a [SnackBar].
-  Future<String?> _fetchAndApplyCatalog() async {
-    final CatalogFetchResult result =
-        await _streamService.fetchCatalogWithDiagnostics();
-    if (!mounted) {
-      return null;
-    }
-
-    if (result.catalog.sources.isNotEmpty) {
-      _mergeSources(result.catalog.sources);
-    }
-
-    for (final ScrapeSourceDefinition embed in result.catalog.embeds) {
-      _embedNameByScraperId[embed.id] = embed.name;
-    }
-
-    if (result.hasSources) {
-      return null;
-    }
-    return result.failureReason ?? 'No sources in /sources response.';
-  }
-
-  /// Backend sources tried last via Oracle VM
-  static const List<String> _backendSourceOrder = <String>[
-    'vidsrc',
-    'granite',
-    'vidlink',
-  ];
-
-  /// Client-side scrapers tried first (fast, no backend dependency)
-  /// Note: vidsrc-client disabled - site blocks direct HTTP (connection reset)
-  static const List<String> _clientSideSourceIds = <String>[
-    'vidlink-client',
-  ];
-
-  Future<void> _startInitialScrapeSequence() async {
-    _ensurePrimaryXprimeNode();
-    _ensureClientSideNodes();
-    _setLoading(true);
-
-    // 1. Try client-side WebView scrapers first (Vidsrc, then Vidlink)
-    for (final String clientSourceId in _clientSideSourceIds) {
-      debugPrint('[SCRAPE] Trying client-side scraper: $clientSourceId');
-      _updateStatus(clientSourceId, ScrapeStatus.pending);
-      _currentPendingSourceId = clientSourceId;
-
-      try {
-        final StreamResult? clientResult =
-            await _tryClientSideScraper(clientSourceId);
-        debugPrint('[SCRAPE] Client-side $clientSourceId: '
-            '${clientResult != null ? "success" : "null"}');
-
-        if (!mounted) {
-          return;
-        }
-
-        if (clientResult != null) {
-          _updateStatus(clientSourceId, ScrapeStatus.success);
-          _navigateToPlayer(clientResult);
-          return;
-        }
-
-        _updateStatus(clientSourceId, ScrapeStatus.notfound);
-      } catch (e) {
-        debugPrint('[SCRAPE] Client-side $clientSourceId error: $e');
-        if (!mounted) {
-          return;
-        }
-        _updateStatus(clientSourceId, ScrapeStatus.failure);
-      }
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    // 2. Try XPrime Finger
-    const String fingerSourceId = 'xprime:finger';
-    _updateStatus(fingerSourceId, ScrapeStatus.pending);
-    _currentPendingSourceId = fingerSourceId;
-
-    try {
-      final StreamResult? xprimeResult = await _xprimeScraper.scrape(
-        context: context,
-        tmdbId: '${widget.mediaItem.tmdbId}',
-        title: widget.mediaItem.title,
-        year: widget.mediaItem.year,
-        season: widget.season,
-        episode: widget.episode,
-        provider: 'finger',
-      );
-
-      if (!mounted) {
-        return;
-      }
-
-      if (xprimeResult != null) {
-        _updateStatus(fingerSourceId, ScrapeStatus.success);
-        _navigateToPlayer(xprimeResult);
-        return;
-      }
-
-      _updateStatus(fingerSourceId, ScrapeStatus.notfound);
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-      _updateStatus(fingerSourceId, ScrapeStatus.failure);
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    // 3. Try backend sources via Oracle VM (Vidsrc -> Granite -> Vidlink)
-    for (final String sourceId in _backendSourceOrder) {
-      debugPrint('[SCRAPE] Trying backend source: $sourceId');
-      _updateStatus(sourceId, ScrapeStatus.pending);
-      _currentPendingSourceId = sourceId;
-
-      try {
-        final StreamResult? result = await _streamService.scrapeSingleSource(
-          widget.mediaItem,
-          selectedId: sourceId,
-          selectedType: 'source',
-          season: widget.season,
-          episode: widget.episode,
-          seasonTmdbId: widget.seasonTmdbId,
-          episodeTmdbId: widget.episodeTmdbId,
-          seasonTitle: widget.seasonTitle,
-        );
-        debugPrint('[SCRAPE] Backend $sourceId: '
-            '${result != null ? "success" : "null"}');
-
-        if (!mounted) {
-          return;
-        }
-
-        if (result != null) {
-          _updateStatus(sourceId, ScrapeStatus.success);
-          _navigateToPlayer(result);
-          return;
-        }
-
-        _updateStatus(sourceId, ScrapeStatus.notfound);
-      } catch (e, st) {
-        debugPrint('[SCRAPE] Backend $sourceId error: $e');
-        debugPrint('[SCRAPE] Stack: $st');
-        if (!mounted) {
-          return;
-        }
-        _updateStatus(sourceId, ScrapeStatus.failure);
-      }
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    // 4. All sources failed, start SSE stream scrape for remaining sources
-    _currentPendingSourceId = null;
-    _startStreamScrape();
-  }
-
-  void _ensurePrimaryXprimeNode() {
-    // Add individual XPrime sources instead of "Auto"
-    // Priority: Finger first, then rest in defined order
-    final List<ScrapeSourceDefinition> xprimeSources =
-        XprimeScraper.sourceDefinitions.toList();
-
-    // Reorder so Finger is first
-    xprimeSources.sort((ScrapeSourceDefinition a, ScrapeSourceDefinition b) {
-      if (a.id == 'xprime:finger') return -1;
-      if (b.id == 'xprime:finger') return 1;
-      return a.id.compareTo(b.id);
-    });
-
-    for (final ScrapeSourceDefinition source in xprimeSources) {
-      if (_nodes.containsKey(source.id)) {
-        continue;
-      }
-      // Remove "(XPrime)" suffix from name - just show provider name
-      final String displayName = source.name.replaceAll(' (XPrime)', '');
-      _nodes[source.id] = _ScrapeNode(
-        id: source.id,
-        name: displayName,
-      );
-      // Use add() not insert(0) to maintain sorted order (Finger first)
-      _sourceOrder.add(source.id);
-      _statuses.putIfAbsent(
-        source.id,
-        () => ScrapeStatus.waiting,
-      );
-    }
-  }
-
-  void _ensureClientSideNodes() {
-    for (final ScrapeSourceDefinition source
-        in VidlinkScraper.sourceDefinitions) {
-      if (_nodes.containsKey(source.id)) continue;
-      _nodes[source.id] = _ScrapeNode(id: source.id, name: source.name);
-      _sourceOrder.add(source.id);
-      _statuses.putIfAbsent(source.id, () => ScrapeStatus.waiting);
-    }
-    for (final ScrapeSourceDefinition source
-        in VidsrcScraper.sourceDefinitions) {
-      if (_nodes.containsKey(source.id)) continue;
-      _nodes[source.id] = _ScrapeNode(id: source.id, name: source.name);
-      _sourceOrder.add(source.id);
-      _statuses.putIfAbsent(source.id, () => ScrapeStatus.waiting);
-    }
-  }
-
-  Future<StreamResult?> _tryClientSideScraper(String sourceId) async {
-    final String tmdbId = '${widget.mediaItem.tmdbId}';
-    if (sourceId == 'vidlink-client') {
-      return _vidlinkScraper.scrape(
-        context: context,
-        tmdbId: tmdbId,
-        title: widget.mediaItem.title,
-        year: widget.mediaItem.year,
-        season: widget.season,
-        episode: widget.episode,
-      );
-    }
-    if (sourceId == 'vidsrc-client') {
-      return _vidsrcScraper.scrape(
-        context: context,
-        tmdbId: tmdbId,
-        title: widget.mediaItem.title,
-        year: widget.mediaItem.year,
-        season: widget.season,
-        episode: widget.episode,
-      );
-    }
-    return null;
-  }
-
-  void _startStreamScrape() {
-    _scrapeSubscription?.cancel();
-    _currentPendingSourceId = null;
-    _scrapeSubscription = _streamService
-        .scrapeStream(
-          widget.mediaItem,
-          season: widget.season,
-          episode: widget.episode,
-          seasonTmdbId: widget.seasonTmdbId,
-          episodeTmdbId: widget.episodeTmdbId,
-          seasonTitle: widget.seasonTitle,
-        )
-        .listen(
-          _handleEvent,
-          onError: _handleError,
-          onDone: () {
-            if (!_hasSuccess() && mounted) {
-              _handleFailure(_failureMessage ?? 'No sources found');
-            }
-          },
-        );
-  }
-
-  void _handleEvent(ScrapeEvent event) {
-    switch (event.type) {
-      case 'init':
-        _mergeSources(event.sources);
-        break;
-      case 'start':
-        final String? sourceId = event.sourceId;
-        if (sourceId != null) {
-          _updateStatus(sourceId, ScrapeStatus.pending);
-        }
-        _setLoading(false);
-        break;
-      case 'update':
-        final String? sourceId = event.sourceId;
-        if (sourceId != null) {
-          final ScrapeStatus status = _statusFromString(event.updateStatus);
-          _updateStatus(sourceId, status);
-        }
-        _setLoading(false);
-        break;
-      case 'embeds':
-        _addEmbeds(event.sourceId, event.embeds);
-        _setLoading(false);
-        break;
-      case 'done':
-        _handleDone(event);
-        break;
-      case 'error':
-        _handleFailure(event.errorMessage ?? 'Scraping failed.');
-        break;
-      default:
-        break;
-    }
-  }
-
-  void _handleDone(ScrapeEvent event) {
-    _setLoading(false);
-
-    final StreamResult? result = event.result;
-    if (event.ok && result != null) {
-      // Server runs sources in order — anything before the winner was tried
-      // and didn't produce a stream, so mark them as failure (red X).
-      _markPrecedingSourcesFailed(result.sourceId);
-      _updateStatus(result.sourceId, ScrapeStatus.success);
-      if (result.embedId != null) {
-        _updateStatus(result.embedId!, ScrapeStatus.success);
-      }
-      _navigateToPlayer(result);
-      return;
-    }
-
-    _handleFailure(event.errorMessage ?? 'No sources found');
-  }
-
-  /// Set every source ordered before [winnerId] to [ScrapeStatus.failure]
-  /// unless it already resolved to a non-waiting state.
-  void _markPrecedingSourcesFailed(String winnerId) {
-    final List<String> ordered = _orderedSourceIdsForUi();
-    for (final String id in ordered) {
-      if (id == winnerId) {
-        return;
-      }
-      final ScrapeStatus current = _statuses[id] ?? ScrapeStatus.waiting;
-      if (current == ScrapeStatus.success) {
-        continue;
-      }
-      _statuses[id] = ScrapeStatus.failure;
-    }
-  }
-
-  void _handleError(Object error, [StackTrace? stackTrace]) {
-    if (!mounted) {
-      return;
-    }
-
-    final String message = error is TimeoutException
-        ? error.message ?? 'Scrape timed out.'
-        : '$error';
-    _handleFailure(message);
-  }
-
-  void _handleFailure(String message) {
-    if (!mounted) {
-      return;
-    }
-
-    final bool hadNoSourcesYet = _sourceOrder.isEmpty;
+  void _retry() {
     setState(() {
-      _isLoading = false;
-      _failureMessage = message;
-      _currentPendingSourceId = null;
-      if (!_hasSuccess()) {
-        _allFailure = true;
-        for (final String sourceId in _sourceOrder) {
-          if (_statuses[sourceId] == ScrapeStatus.pending ||
-              _statuses[sourceId] == ScrapeStatus.waiting) {
-            _statuses[sourceId] = ScrapeStatus.failure;
-          }
-        }
-      }
+      _request = _fetch();
     });
-    // If SSE never populated sources (buffering, empty init, etc.), GET /sources
-    // often still works — merge so "Choose source manually" can open.
-    if (hadNoSourcesYet) {
-      unawaited(_fetchAndApplyCatalog());
-    }
   }
 
-  void _mergeSources(List<ScrapeSourceDefinition> sources) {
+  void _onSuccess(OmssResponse response) {
     if (!mounted) {
       return;
     }
-
-    setState(() {
-      for (final ScrapeSourceDefinition source in sources.where(
-        (ScrapeSourceDefinition source) =>
-            source.supportsMediaType(_scrapeMediaType) &&
-            source.id != 'xprime:auto',
-      )) {
-        if (source.id.isEmpty) {
-          continue;
-        }
-        if (!_nodes.containsKey(source.id)) {
-          _nodes[source.id] = _ScrapeNode(id: source.id, name: source.name);
-          _sourceOrder.add(source.id);
-        } else if (_nodes[source.id]!.name.isEmpty && source.name.isNotEmpty) {
-          _nodes[source.id] = _nodes[source.id]!.copyWith(name: source.name);
-        }
-
-        _statuses.putIfAbsent(source.id, () => ScrapeStatus.waiting);
-      }
-      _isLoading = false;
-    });
-  }
-
-  List<String> _orderedSourceIdsForUi() {
-    final Set<String> known = _nodes.keys.toSet();
-    if (known.isEmpty) {
-      return <String>[];
-    }
-    final List<String> out = <String>[];
-    // 1. Client-side scrapers first (Vidsrc, Vidlink)
-    for (final String id in _clientSideSourceIds) {
-      if (known.contains(id) && !out.contains(id)) {
-        out.add(id);
-      }
-    }
-    // 2. XPrime sources (Finger first, then others)
-    for (final String id in _sourceOrder) {
-      if (id.startsWith('xprime:') && !out.contains(id)) {
-        out.add(id);
-      }
-    }
-    // 3. Backend sources via Oracle VM (Vidsrc, Granite, Vidlink)
-    final List<String>? preferred = AppConfig.scrapeSourceOrderList;
-    if (preferred != null) {
-      for (final String id in preferred) {
-        if (known.contains(id) && !out.contains(id)) {
-          out.add(id);
-        }
-      }
-    }
-    // Add any remaining sources
-    for (final String id in _sourceOrder) {
-      if (!out.contains(id)) {
-        out.add(id);
-      }
-    }
-    return out;
-  }
-
-  ScrapeStatus _displayStatusForList(String id) {
-    if (_currentPendingSourceId == id) {
-      return ScrapeStatus.pending;
-    }
-    final ScrapeStatus real = _statuses[id] ?? ScrapeStatus.waiting;
-    if (real == ScrapeStatus.success ||
-        real == ScrapeStatus.failure ||
-        real == ScrapeStatus.notfound) {
-      return real;
-    }
-    if (_allFailure) {
-      if (real == ScrapeStatus.waiting || real == ScrapeStatus.pending) {
-        return ScrapeStatus.failure;
-      }
-      return real;
-    }
-    return real;
-  }
-
-  void _addEmbeds(String? sourceId, List<ScrapeSourceDefinition> embeds) {
-    if (!mounted || sourceId == null || !_nodes.containsKey(sourceId)) {
-      return;
-    }
-
-    setState(() {
-      final _ScrapeNode sourceNode = _nodes[sourceId]!;
-      final List<String> children = List<String>.from(sourceNode.embedIds);
-
-      for (final ScrapeSourceDefinition embed in embeds) {
-        final String embedName = embed.name.isNotEmpty
-            ? embed.name
-            : _embedNameByScraperId[embed.embedScraperId] ??
-                  embed.embedScraperId ??
-                  embed.id;
-
-        _nodes.putIfAbsent(
-          embed.id,
-          () => _ScrapeNode(id: embed.id, name: embedName),
-        );
-        _statuses.putIfAbsent(embed.id, () => ScrapeStatus.waiting);
-        if (!children.contains(embed.id)) {
-          children.add(embed.id);
-        }
-      }
-
-      _nodes[sourceId] = sourceNode.copyWith(embedIds: children);
-    });
-  }
-
-  void _updateStatus(String id, ScrapeStatus status) {
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _statuses[id] = status;
-      if (status == ScrapeStatus.pending) {
-        _currentPendingSourceId = id;
-      } else if (_currentPendingSourceId == id) {
-        _currentPendingSourceId = null;
-      }
-    });
-  }
-
-  void _setLoading(bool value) {
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _isLoading = value;
-    });
-  }
-
-  bool _hasSuccess() {
-    return _statuses.values.contains(ScrapeStatus.success);
-  }
-
-  List<String> _manualSourceIds() {
-    final List<String> ids = <String>[];
-    // Show all XPrime providers (auto source removed)
-    for (final ScrapeSourceDefinition source in XprimeScraper.sourceDefinitions) {
-      ids.add(source.id);
-    }
-    for (final String id in _orderedSourceIdsForUi()) {
-      if (!ids.contains(id)) {
-        ids.add(id);
-      }
-    }
-    return ids;
-  }
-
-  List<String> _xprimeSourceIds() {
-    return XprimeScraper.sourceDefinitions
-        .map((ScrapeSourceDefinition source) => source.id)
-        .toList();
-  }
-
-  String _labelForSourceId(String sourceId) {
-    final String? existing = _nodes[sourceId]?.name;
-    if (existing != null && existing.trim().isNotEmpty) {
-      return existing;
-    }
-    for (final ScrapeSourceDefinition source in XprimeScraper.sourceDefinitions) {
-      if (source.id == sourceId) {
-        // Remove "(XPrime)" suffix for cleaner display
-        return source.name.replaceAll(' (XPrime)', '');
-      }
-    }
-    for (final ScrapeSourceDefinition source in VidlinkScraper.sourceDefinitions) {
-      if (source.id == sourceId) return source.name;
-    }
-    for (final ScrapeSourceDefinition source in VidsrcScraper.sourceDefinitions) {
-      if (source.id == sourceId) return source.name;
-    }
-    return sourceId;
-  }
-
-  Future<void> _showManualPicker({bool xprimeOnly = false}) async {
-    if (!xprimeOnly && _sourceOrder.isEmpty) {
-      final String? catalogErr = await _fetchAndApplyCatalog();
-      if (!mounted || !context.mounted) {
-        return;
-      }
-      if (catalogErr != null || _sourceOrder.isEmpty) {
-        _showSnackBarIfMounted(
-          catalogErr ??
-              'No sources after /sources. Compare with curl on a PC.',
-        );
-        return;
-      }
-    }
-
-    if (!mounted || !context.mounted) {
-      return;
-    }
-    final String? sourceId = await showModalBottomSheet<String>(
-      context: context,
-      builder: (BuildContext context) {
-        final List<String> ids =
-            xprimeOnly ? _xprimeSourceIds() : _manualSourceIds();
-        return SafeArea(
-          child: ListView.builder(
-            itemCount: ids.length,
-            itemBuilder: (BuildContext context, int index) {
-              final String id = ids[index];
-              final String label = _labelForSourceId(id);
-
-              return ListTile(
-                minTileHeight: AppSpacing.x12,
-                title: Text(label),
-                onTap: () => Navigator.of(context).pop(id),
-              );
-            },
-          ),
-        );
-      },
-    );
-
-    if (sourceId == null || !context.mounted) {
-      return;
-    }
-
-    await _retrySingleSource(sourceId);
-  }
-
-  Future<void> _showXprimePicker() {
-    return _showManualPicker(xprimeOnly: true);
-  }
-
-  Future<void> _retrySingleSource(String sourceId) async {
-    setState(() {
-      _allFailure = false;
-      _failureMessage = null;
-      _isLoading = true;
-      _statuses[sourceId] = ScrapeStatus.pending;
-      _currentPendingSourceId = sourceId;
-      _nodes.putIfAbsent(
-        sourceId,
-        () => _ScrapeNode(
-          id: sourceId,
-          name: _labelForSourceId(sourceId),
-        ),
-      );
-    });
-
-    try {
-      StreamResult? result;
-      if (sourceId.startsWith('xprime:')) {
-        result = await _xprimeScraper.scrape(
-          // ignore: use_build_context_synchronously
-          context: context,
-          tmdbId: '${widget.mediaItem.tmdbId}',
-          title: widget.mediaItem.title,
-          year: widget.mediaItem.year,
-          season: widget.season,
-          episode: widget.episode,
-          // Extract provider from xprime:<provider> format
-          provider: sourceId.substring('xprime:'.length),
-        );
-      } else if (_clientSideSourceIds.contains(sourceId)) {
-        result = await _tryClientSideScraper(sourceId);
-      } else {
-        result = await _streamService.scrapeSingleSource(
-              widget.mediaItem,
-              selectedId: sourceId,
-              selectedType: 'source',
-              season: widget.season,
-              episode: widget.episode,
-              seasonTmdbId: widget.seasonTmdbId,
-              episodeTmdbId: widget.episodeTmdbId,
-              seasonTitle: widget.seasonTitle,
-            );
-      }
-
-      if (!context.mounted) {
-        return;
-      }
-
-      if (result == null) {
-        setState(() {
-          _isLoading = false;
-          _statuses[sourceId] = ScrapeStatus.notfound;
-          _currentPendingSourceId = null;
-          _allFailure = true;
-          _failureMessage = 'No sources found';
-        });
-        return;
-      }
-
-      setState(() {
-        _isLoading = false;
-        _statuses[sourceId] = ScrapeStatus.success;
-        _currentPendingSourceId = null;
-        if (result!.embedId != null) {
-          _statuses[result.embedId!] = ScrapeStatus.success;
-        }
-      });
-      _navigateToPlayer(result);
-    } catch (error) {
-      if (!context.mounted) {
-        return;
-      }
-
-      setState(() {
-        _isLoading = false;
-        _statuses[sourceId] = ScrapeStatus.failure;
-        _currentPendingSourceId = null;
-        _allFailure = true;
-        _failureMessage = '$error';
-      });
-    }
-  }
-
-  void _navigateToPlayer(StreamResult result) {
-    if (!context.mounted) {
-      return;
-    }
-
     context.push(
       '/player',
       extra: PlayerScreenArgs(
         mediaItem: widget.mediaItem,
-        streamResult: result,
+        omssResponse: response,
         season: widget.season,
         episode: widget.episode,
         seasonTmdbId: widget.seasonTmdbId,
@@ -822,20 +111,16 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
     );
   }
 
+  String _describeMedia() {
+    final MediaItem m = widget.mediaItem;
+    if (m.isShow && widget.season != null && widget.episode != null) {
+      return '${m.title} · S${widget.season} E${widget.episode}';
+    }
+    return m.title;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final List<String> baseOrderedSources = _orderedSourceIdsForUi();
-    final List<String> orderedSources = _currentPendingSourceId != null &&
-            _currentPendingSourceId!.startsWith('xprime:')
-        ? <String>[
-            ...baseOrderedSources,
-            if (!baseOrderedSources.contains(_currentPendingSourceId))
-              _currentPendingSourceId!,
-          ]
-        : baseOrderedSources;
-    final _ScrapeNode? activeNode =
-        _currentPendingSourceId != null ? _nodes[_currentPendingSourceId] : null;
-
     return Scaffold(
       backgroundColor: AppColors.backgroundMain,
       appBar: AppBar(
@@ -854,230 +139,89 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
       ),
       body: SafeArea(
         top: false,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            if (_isLoading || _currentPendingSourceId != null)
-              const RepaintBoundary(
-                child: LinearProgressIndicator(minHeight: AppSpacing.x1),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.x6,
+                vertical: AppSpacing.x8,
               ),
-            Expanded(
-              child: SingleChildScrollView(
-                controller: _scrollController,
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.x4,
-                  AppSpacing.x6,
-                  AppSpacing.x4,
-                  AppSpacing.x4,
-                ),
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 480),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: <Widget>[
-                        _ScrapingHeader(
-                          activeName: activeNode?.name,
-                          allFailure: _allFailure,
-                          loading: _isLoading,
-                        ),
-                        const SizedBox(height: AppSpacing.x6),
-                        if (orderedSources.isNotEmpty)
-                          ListView.builder(
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            itemCount: orderedSources.length,
-                            itemBuilder: (BuildContext context, int index) {
-                              final String id = orderedSources[index];
-                              final _ScrapeNode? node = _nodes[id];
-                              if (node == null) {
-                                return const SizedBox.shrink();
-                              }
-                              final ScrapeStatus st = _displayStatusForList(id);
-                              return ScrapeSourceCard(
-                                sourceName: node.name,
-                                status: st,
-                                subline: st == ScrapeStatus.pending
-                                    ? 'Checking for videos...'
-                                    : null,
-                              );
-                            },
-                          )
-                        else
-                          _IdleScrapeCard(
-                            label: _isLoading
-                                ? 'Preparing provider list...'
-                                : 'Waiting for the next step.',
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
+              child: FutureBuilder<OmssResponse>(
+                future: _request,
+                builder: (BuildContext context,
+                    AsyncSnapshot<OmssResponse> snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return _LoadingState(description: _describeMedia());
+                  }
+                  if (snapshot.hasError || !snapshot.hasData) {
+                    return _ErrorState(
+                      error: snapshot.error,
+                      description: _describeMedia(),
+                      onRetry: _retry,
+                      onBack: () => Navigator.of(context).maybePop(),
+                    );
+                  }
+                  final OmssResponse response = snapshot.data!;
+                  if (response.isEmpty) {
+                    return _ErrorState(
+                      error: const _EmptySourcesError(),
+                      description: _describeMedia(),
+                      onRetry: _retry,
+                      onBack: () => Navigator.of(context).maybePop(),
+                    );
+                  }
+                  // Schedule the navigation for the next frame so the
+                  // FutureBuilder has finished its build phase.
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) {
+                      _onSuccess(response);
+                    }
+                  });
+                  return _LoadingState(description: _describeMedia());
+                },
               ),
             ),
-            if (_allFailure)
-              SafeArea(
-                top: false,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    AppSpacing.x4,
-                    AppSpacing.x2,
-                    AppSpacing.x4,
-                    AppSpacing.x4,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: <Widget>[
-                      Text(
-                        'Tip: Subtitles, quality and source default can be changed in Settings.',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: AppColors.typeSecondary,
-                            ),
-                      ),
-                      const SizedBox(height: AppSpacing.x3),
-                      Row(
-                        children: <Widget>[
-                          Expanded(
-                            child: OutlinedButton(
-                              style: OutlinedButton.styleFrom(
-                                minimumSize:
-                                    const Size.fromHeight(AppSpacing.x12),
-                              ),
-                              onPressed: () =>
-                                  Navigator.of(context).maybePop(),
-                              child: const Text('Back to home'),
-                            ),
-                          ),
-                          const SizedBox(width: AppSpacing.x3),
-                          Expanded(
-                            child: FilledButton(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: AppColors.buttonsPurple,
-                                foregroundColor: AppColors.typeEmphasis,
-                                minimumSize:
-                                    const Size.fromHeight(AppSpacing.x12),
-                              ),
-                              onPressed: () async {
-                                setState(() {
-                                  _allFailure = false;
-                                  _failureMessage = null;
-                                  _isLoading = true;
-                                  _currentPendingSourceId = null;
-                                  _statuses.clear();
-                                  for (final String id in _sourceOrder) {
-                                    _statuses[id] = ScrapeStatus.waiting;
-                                  }
-                                });
-                                if (_sourceOrder.isEmpty) {
-                                  final String? catalogErr =
-                                      await _fetchAndApplyCatalog();
-                                  if (!context.mounted) {
-                                    return;
-                                  }
-                                  if (catalogErr != null) {
-                                    _showSnackBarIfMounted(catalogErr);
-                                  }
-                                  setState(() {
-                                    for (final String id in _sourceOrder) {
-                                      _statuses[id] = ScrapeStatus.waiting;
-                                    }
-                                  });
-                                }
-                                unawaited(_startInitialScrapeSequence());
-                              },
-                              child: const Text('Try again'),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: AppSpacing.x2),
-                      Wrap(
-                        alignment: WrapAlignment.center,
-                        spacing: AppSpacing.x2,
-                        runSpacing: AppSpacing.x1,
-                        children: <Widget>[
-                          TextButton(
-                            onPressed: _showXprimePicker,
-                            child: const Text('Try XPrime fallback'),
-                          ),
-                          TextButton(
-                            onPressed: _showManualPicker,
-                            child: const Text('Choose source manually'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
+          ),
         ),
       ),
     );
   }
-
 }
 
-/// Centered hero block above the source list. Mirrors the web scraping
-/// page's "Looking for streams" + active provider readout.
-class _ScrapingHeader extends StatelessWidget {
-  const _ScrapingHeader({
-    required this.activeName,
-    required this.allFailure,
-    required this.loading,
-  });
+class _LoadingState extends StatelessWidget {
+  const _LoadingState({required this.description});
 
-  final String? activeName;
-  final bool allFailure;
-  final bool loading;
+  final String description;
 
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
-    final String headline = allFailure
-        ? 'No stream found'
-        : (activeName != null
-            ? 'Looking for streams'
-            : (loading ? 'Looking for streams' : 'Preparing'));
-    final String sub = allFailure
-        ? 'Every source we tried did not work. Try again or pick one manually.'
-        : (activeName != null
-            ? 'Currently checking $activeName'
-            : 'Picking up the source catalog from the resolver.');
-
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        Center(
-          child: SizedBox(
-            width: AppSpacing.x16,
-            height: AppSpacing.x16,
-            child: allFailure
-                ? const StatusCircle(
-                    status: ScrapeStatus.failure,
-                    size: AppSpacing.x16,
-                    strokeWidth: 3,
-                  )
-                : const StatusCircle(
-                    status: ScrapeStatus.pending,
-                    size: AppSpacing.x16,
-                    strokeWidth: 3,
-                  ),
+        const SizedBox(
+          width: AppSpacing.x16,
+          height: AppSpacing.x16,
+          child: RepaintBoundary(
+            child: CircularProgressIndicator(strokeWidth: 3),
           ),
         ),
-        const SizedBox(height: AppSpacing.x4),
+        const SizedBox(height: AppSpacing.x6),
         Text(
-          headline,
+          'Finding sources…',
           textAlign: TextAlign.center,
           style: theme.textTheme.headlineSmall?.copyWith(
             color: AppColors.typeEmphasis,
             fontWeight: FontWeight.w700,
           ),
         ),
-        const SizedBox(height: AppSpacing.x2),
+        const SizedBox(height: AppSpacing.x3),
         Text(
-          sub,
+          description,
           textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
           style: theme.textTheme.bodyMedium?.copyWith(
             color: AppColors.typeSecondary,
           ),
@@ -1087,55 +231,113 @@ class _ScrapingHeader extends StatelessWidget {
   }
 }
 
-ScrapeStatus _statusFromString(String? value) {
-  return switch (value) {
-    'pending' => ScrapeStatus.pending,
-    'success' => ScrapeStatus.success,
-    'failure' => ScrapeStatus.failure,
-    'notfound' => ScrapeStatus.notfound,
-    _ => ScrapeStatus.waiting,
-  };
-}
-
-class _ScrapeNode {
-  const _ScrapeNode({
-    required this.id,
-    required this.name,
-    this.embedIds = const <String>[],
+class _ErrorState extends StatelessWidget {
+  const _ErrorState({
+    required this.error,
+    required this.description,
+    required this.onRetry,
+    required this.onBack,
   });
 
-  final String id;
-  final String name;
-  final List<String> embedIds;
+  final Object? error;
+  final String description;
+  final VoidCallback onRetry;
+  final VoidCallback onBack;
 
-  _ScrapeNode copyWith({String? name, List<String>? embedIds}) {
-    return _ScrapeNode(
-      id: id,
-      name: name ?? this.name,
-      embedIds: embedIds ?? this.embedIds,
-    );
+  String get _userMessage {
+    if (error is OmssException) {
+      final OmssException e = error as OmssException;
+      return 'The resolver returned HTTP ${e.statusCode}. '
+          'Check the cinepro server logs and your network.';
+    }
+    if (error is TimeoutException) {
+      return 'The resolver took too long to respond (over 60 seconds). '
+          'Try again or check the cinepro server.';
+    }
+    if (error is SocketException) {
+      return "Couldn't reach the resolver. "
+          'Check ORACLE_URL, Wi-Fi, and the cinepro server.';
+    }
+    if (error is _EmptySourcesError) {
+      return 'cinepro returned no playable sources for this title. '
+          'It may be too new, region-locked, or temporarily unavailable.';
+    }
+    if (error is FormatException) {
+      return "The resolver returned an unexpected response shape. "
+          'Check the cinepro server version.';
+    }
+    return 'Something went wrong while finding sources.';
   }
-}
-
-class _IdleScrapeCard extends StatelessWidget {
-  const _IdleScrapeCard({required this.label});
-
-  final String label;
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppColors.videoContextBackground.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(AppSpacing.x4),
-        border: Border.all(
-          color: AppColors.videoContextBorder.withValues(alpha: 0.6),
+    final ThemeData theme = Theme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        const Icon(
+          Icons.error_outline_rounded,
+          color: AppColors.videoContextError,
+          size: AppSpacing.x16,
         ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.x5),
-        child: Text(label, style: Theme.of(context).textTheme.bodyLarge),
-      ),
+        const SizedBox(height: AppSpacing.x4),
+        Text(
+          "Couldn't find sources",
+          textAlign: TextAlign.center,
+          style: theme.textTheme.headlineSmall?.copyWith(
+            color: AppColors.typeEmphasis,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: AppSpacing.x3),
+        Text(
+          description,
+          textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: AppColors.typeSecondary,
+          ),
+        ),
+        const SizedBox(height: AppSpacing.x3),
+        Text(
+          _userMessage,
+          textAlign: TextAlign.center,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: AppColors.typeSecondary,
+          ),
+        ),
+        const SizedBox(height: AppSpacing.x6),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(AppSpacing.x12),
+                ),
+                onPressed: onBack,
+                child: const Text('Back'),
+              ),
+            ),
+            const SizedBox(width: AppSpacing.x3),
+            Expanded(
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.buttonsPurple,
+                  foregroundColor: AppColors.typeEmphasis,
+                  minimumSize: const Size.fromHeight(AppSpacing.x12),
+                ),
+                onPressed: onRetry,
+                child: const Text('Try again'),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
+}
+
+class _EmptySourcesError implements Exception {
+  const _EmptySourcesError();
 }

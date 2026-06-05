@@ -1,30 +1,46 @@
+// Veil runtime configuration.
+//
+// `ORACLE_URL` is the base of the self-hosted cinepro-org/core resolver
+// (OMSS v1.0) running on the Oracle VM. cinepro returns absolute proxy
+// URLs in every `source.url`, so the app does no URL prefixing or
+// header injection. `resolveOmssUrl` exists as a defensive guard for
+// any future relative path the server might emit.
+
 class AppConfig {
   AppConfig._();
 
-  static String get proxyBaseUrl => _normalizeProxyBaseUrl(
-    const String.fromEnvironment(
+  /// Base URL for the cinepro-org/core resolver (e.g.
+  /// `http://VM_IP:3001`). Used to build OMSS v1.0 request URLs and
+  /// as the prefix for any relative path passed to [resolveOmssUrl].
+  static String get oracleUrl {
+    const String raw = String.fromEnvironment(
       'ORACLE_URL',
       defaultValue: 'http://127.0.0.1:3001',
-    ),
-  );
+    );
+    return _trimTrailingSlash(raw.trim());
+  }
+
+  /// Returns [path] unchanged if it is already an absolute URL
+  /// (has a scheme and host). Otherwise prefixes it with [oracleUrl].
+  static String resolveOmssUrl(String path) {
+    final String trimmed = path.trim();
+    if (trimmed.isEmpty) {
+      return trimmed;
+    }
+    final Uri? uri = Uri.tryParse(trimmed);
+    if (uri != null && uri.hasScheme && uri.host.isNotEmpty) {
+      return trimmed;
+    }
+    if (trimmed.startsWith('/')) {
+      return '$oracleUrl$trimmed';
+    }
+    return '$oracleUrl/$trimmed';
+  }
 
   static String get tmdbReadToken =>
       const String.fromEnvironment('TMDB_TOKEN', defaultValue: '');
 
   static bool get hasTmdbReadToken => tmdbReadToken.trim().isNotEmpty;
-
-  /// Fixed source order for UI display (backend).
-  /// Priority: Vidsrc -> Granite -> Vidlink -> XPrime (Finger, Primebox, King, Facile, Lighter, Fed, Eek)
-  static const String scrapeSourceOrder = 'vidsrc,granite,vidlink,xprime:finger,xprime:primebox,xprime:king,xprime:facile,xprime:lighter,xprime:fed,xprime:eek';
-
-  static List<String>? get scrapeSourceOrderList {
-    final List<String> ids = scrapeSourceOrder
-        .split(',')
-        .map((String s) => s.trim())
-        .where((String s) => s.isNotEmpty)
-        .toList();
-    return ids.isEmpty ? null : ids;
-  }
 
   /// Wyzie Subs API key — https://sub.wyzie.io/redeem (never commit; use `--dart-define`).
   static String get wyzieApiKey =>
@@ -58,8 +74,8 @@ class AppConfig {
   );
 
   static bool get isDefaultLocalOracleUrl {
-    return proxyBaseUrl == 'http://127.0.0.1:3001' ||
-        proxyBaseUrl == 'http://localhost:3001';
+    return oracleUrl == 'http://127.0.0.1:3001' ||
+        oracleUrl == 'http://localhost:3001';
   }
 
   static double get watchedRatio {
@@ -72,24 +88,5 @@ class AppConfig {
 
   static String _trimTrailingSlash(String value) {
     return value.replaceFirst(RegExp(r'/+$'), '');
-  }
-
-  static String _normalizeProxyBaseUrl(String value) {
-    final String trimmed = _trimTrailingSlash(value.trim());
-    if (trimmed.isEmpty) {
-      return '';
-    }
-
-    final Uri? uri = Uri.tryParse(trimmed);
-    if (uri == null || uri.host.isEmpty) {
-      return trimmed;
-    }
-
-    if (uri.hasPort) {
-      return trimmed;
-    }
-
-    final Uri normalized = uri.replace(port: 3001);
-    return normalized.toString();
   }
 }

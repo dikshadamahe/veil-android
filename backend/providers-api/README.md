@@ -1,50 +1,59 @@
-# providers-api (“pstream-backend” in deploy docs)
+# providers-api — **LEGACY**
 
-Express service on **port 3001** that wraps **`@p-stream/providers`** (`targets.NATIVE`). The Flutter app points **`ORACLE_URL`** here (not at `simple-proxy` :3000).
+> **This folder is no longer the deployed resolver.** The active resolver on the Oracle VM is **`cinepro-org/core`** (OMSS v1.0). The folder is kept for history and as a reference for the legacy SSE / blocking scrape shape. See the project `README.md` and `HANDOFF.md` for the current architecture.
 
-## What is *not* in this repo
+`providers-api` was an Express service on **port 3001** that wrapped **`@p-stream/providers`** (`targets.NATIVE`). The Flutter app pointed **`ORACLE_URL`** at this service. It exposed:
 
-There is no separate **`@pstream-backend`** package in the Android repo: Oracle runs **this folder** (or a copy of it) under PM2 as `providers-api`.
+- `GET /health` — health check
+- `GET /sources` — catalog of `sources[]` and `embeds[]` (Sourcerer ids from `@p-stream/providers`)
+- `GET /scrape?…` — blocking single-shot scrape with `sourceOrder` / `embedOrder` / `selectedId` / `selectedType` / `parentSourceId` query params
+- `GET /scrape/stream?…` — SSE scrape with `init` / `start` / `update` / `done` / `error` events, anti-buffering keepalives
 
-## Adding scrapers (VidSrc.me, 2Embed.cc, AutoEmbed, CinePro, …)
+## Why we moved off it
 
-Step-by-step for **domains + APIs you listed** (`vidsrc-embed.ru`, 2embed.cc, AutoEmbed leave-as-is, CinePro Core): see **[docs/CUSTOM_EMBED_INTEGRATION.md](docs/CUSTOM_EMBED_INTEGRATION.md)**.
+- The user is now running a single self-hosted **`cinepro-org/core`** resolver (OMSS v1.0) on the same port (`:3001`) that returns the full `sources[]` in one HTTP GET.
+- The 14 cinepro providers (CineSu, FshareTV, Icefy, Peachify, Popr, MafiaEmbed, Tulnex, VidApi, Videasy, VidNest, VidRock, VidSrc, VidZee, VixSrc) replace the per-source @p-stream/providers list.
+- `source.url` from cinepro is already an absolute proxy URL — the Flutter app no longer needs to inject `Referer` / `Origin` / `User-Agent`, no longer needs to fetch HLS m3u8 through a separate `simple-proxy` hop, and no longer needs an SSE pipeline.
 
-Short version:
+## New contract (what the Flutter app talks to now)
 
-1. **Sourcerer ids** must exist in **`xp-technologies-dev/providers`** (or a fork) as `makeSourcerer({ id: '…' })`. The app sends them as the `sourceOrder` query string (comma-separated).
-2. **Your Oracle `/sources` JSON is the source of truth** for which ids exist today (e.g. `vidlink`, `fedapi`, …; embeds like `autoembed-english` are separate from top-level **source** ids).
-3. **CinePro** is an **OMSS** backend ([docs](https://cinepro.mintlify.app/)) — integrate via a **new sourcerer**, a **bridge** in this repo, or a sidecar; it is not a drop-in string in `@p-stream/providers` until someone implements it.
-
-To ship new sourcerers, the work is usually in **`xp-technologies-dev/providers`** (TypeScript + tests), then:
-
-```bash
-cd backend/providers-api
-pnpm install   # or npm install
-# bump @p-stream/providers to your branch/commit if forked
+```
+GET {ORACLE_URL}/v1/movies/{tmdbId}
+GET {ORACLE_URL}/v1/tv/{tmdbId}/seasons/{s}/episodes/{e}
+GET {ORACLE_URL}/v1/proxy?data={base64url_encoded_json}
+GET {ORACLE_URL}/v1/health
 ```
 
-Redeploy on Oracle and restart PM2.
+Response shape (OMSS v1.0):
 
-## What we need from you (Oracle / ops)
-
-Send (redact secrets):
-
-1. **Output of** `curl -sS "http://<VM_IP>:3001/sources" | head -c 4000` — confirms which sourcerer **ids** your VM actually exposes.
-2. **`package.json` / lockfile** line for `@p-stream/providers` (GitHub ref or npm version) running on the VM.
-3. **PM2** process name and **`pm2 logs`** snippet from a slow scrape (if any).
-4. Whether you can point **`@p-stream/providers`** at a **fork** (branch URL) where we enable `disabled: false` for chosen sourcerers after testing.
-
-## Environment
-
-| Variable | Purpose |
-|----------|---------|
-| `PORT` | Listen port (default `3001`) |
-| `REQUEST_TIMEOUT_MS` | Cap for `runAll` (default `90000`) |
-| `SIMPLE_PROXY_URL` | Optional; forwarded in `/health` for operators |
-
-## Health check
-
-```bash
-curl -sS "http://<VM_IP>:3001/health"
+```json
+{
+  "responseId": "uuid",
+  "expiresAt": "2026-06-05T18:30:00Z",
+  "sources": [
+    {
+      "url": "http://VM_IP:3001/v1/proxy?data=…",
+      "type": "hls" | "mp4",
+      "quality": "1080p",
+      "audioTracks": [{ "language": "en", "label": "English" }],
+      "provider": { "id": "vidsrc", "name": "VidSrc" }
+    }
+  ],
+  "subtitles": [
+    { "url": "http://VM_IP:3001/v1/proxy?data=…", "label": "English", "format": "vtt" }
+  ],
+  "diagnostics": []
+}
 ```
+
+## Files in this folder
+
+- `src/server.js` — Express entry; `/health`, `/sources`, `/scrape`, `/scrape/stream`
+- `src/providers.js` — wraps `makeProviders({ target: targets.NATIVE })`
+- `src/normalize.js` — normalizes a `@p-stream/providers` `runAll` output into the JSON shape the Flutter app consumed
+- `src/config.js` — reads `PORT`, `REQUEST_TIMEOUT_MS`, `SIMPLE_PROXY_URL`
+- `docs/CUSTOM_EMBED_INTEGRATION.md` — notes on third-party embed integration (most of it predates cinepro; the CinePro section in §4 is the only part that still applies, and is superseded by this README + `HANDOFF.md`)
+
+## When to delete
+
+Once the OMSS migration in the Flutter app ships and there are no more references to `StreamService.scrapeStream`, `StreamService.scrapeBlocking`, `StreamService.scrapeSingleSource`, `StreamService.fetchCatalog`, `ScrapeEvent`, or `ScrapeSourceDefinition`, this folder (and `backend/providers-lib/`) can be deleted.

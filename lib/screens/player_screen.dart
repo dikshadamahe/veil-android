@@ -17,16 +17,14 @@ import 'package:pstream_android/config/app_theme.dart';
 import 'package:pstream_android/models/external_subtitle_offer.dart';
 import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/models/episode.dart';
+import 'package:pstream_android/models/omss_source.dart';
 import 'package:pstream_android/models/season.dart';
-import 'package:pstream_android/models/scrape_event.dart';
 import 'package:pstream_android/models/stream_result.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/screens/scraping_screen.dart';
 import 'package:pstream_android/services/external_subtitle_service.dart';
-import 'package:pstream_android/services/stream_service.dart'
-    show ScrapeCatalog, StreamService;
-import 'package:pstream_android/services/xprime_scraper.dart';
+import 'package:pstream_android/services/stream_service.dart';
 import 'package:pstream_android/storage/local_storage.dart';
 import 'package:pstream_android/utils/player_native_tune.dart';
 import 'package:pstream_android/widgets/player_controls.dart';
@@ -35,8 +33,6 @@ import 'package:screen_brightness/screen_brightness.dart';
 enum _PlayerEdgeSwipe { none, brightness, volume }
 
 /// Per-source probe result for the "check streams" UI.
-enum _SourceStreamStatus { unknown, loading, playable, none }
-
 /// One row in the subtitles sheet: embedded tracks + online offers for a language.
 class _MergedSubtitleLang {
   const _MergedSubtitleLang({
@@ -64,7 +60,8 @@ class _MergedSubtitleLang {
 class PlayerScreenArgs {
   const PlayerScreenArgs({
     required this.mediaItem,
-    required this.streamResult,
+    required this.omssResponse,
+    int? initialSourceIndex,
     this.season,
     this.episode,
     this.seasonTmdbId,
@@ -72,10 +69,19 @@ class PlayerScreenArgs {
     this.seasonTitle,
     this.resumeFrom,
     this.replaceEpoch,
-  });
+  }) : _initialSourceIndex = initialSourceIndex;
 
   final MediaItem mediaItem;
-  final StreamResult streamResult;
+
+  /// The full OMSS v1.0 response for this title. The player uses it
+  /// to populate the source picker and to switch sources without
+  /// re-fetching unless [refresh] is invoked from the sheet.
+  final OmssResponse omssResponse;
+
+  /// Index of the source the caller wants to start with. Defaults to
+  /// "first hls at 1080p, else first hls, else first source" when null.
+  final int? _initialSourceIndex;
+
   final int? season;
   final int? episode;
   final String? seasonTmdbId;
@@ -84,9 +90,37 @@ class PlayerScreenArgs {
   final int? resumeFrom;
 
   /// Bumps on each [context.go] to `/player` so the route [ValueKey] changes
-  /// even when the server returns the same [StreamResult.sourceId] / URL for a
-  /// new scrape (e.g. provider always labels the row as “Vidlink”).
+  /// even when the server returns the same source for a fresh OMSS fetch.
   final int? replaceEpoch;
+
+  /// The [OmssSource] the player should open with. Computed once at
+  /// construction; the source sheet may swap to a different source by
+  /// constructing a fresh [PlayerScreenArgs] with a new index.
+  OmssSource get initialSource {
+    final List<OmssSource> sources = omssResponse.sources;
+    if (sources.isEmpty) {
+      throw StateError('OmssResponse has no sources.');
+    }
+    final int? idx = _initialSourceIndex;
+    if (idx != null && idx >= 0 && idx < sources.length) {
+      return sources[idx];
+    }
+    return _pickInitialSource(sources);
+  }
+
+  static OmssSource _pickInitialSource(List<OmssSource> sources) {
+    for (final OmssSource s in sources) {
+      if (s.isHls && (s.quality ?? '').contains('1080')) {
+        return s;
+      }
+    }
+    for (final OmssSource s in sources) {
+      if (s.isHls) {
+        return s;
+      }
+    }
+    return sources.first;
+  }
 }
 
 class PlayerScreen extends ConsumerStatefulWidget {
@@ -145,14 +179,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _sourceSwitching = false;
   String? _pendingSourceId;
   String? _pendingSourceLabel;
-  /// Per-source probe (Sources sheet). Lives on the player, not the sheet, so
-  /// “Check which sources …” can finish after the user closes the bottom sheet.
-  final Map<String, _SourceStreamStatus> _sourceProbeStatus =
-      <String, _SourceStreamStatus>{};
-  bool _sourceProbeScanRunning = false;
-  /// Bumps the Sources sheet to rebuild (modal route is not a child of this
-  /// [setState], so ticks update live via [Listenable]).
-  final ValueNotifier<int> _sourceProbeUi = ValueNotifier<int>(0);
   /// When set, the matching [ExternalSubtitleOffer.id] is the active online track.
   String? _activeExternalOfferId;
   /// Short label for settings card when an online track is active.
@@ -165,7 +191,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   StreamCaption? _selectedCaption;
   late final StorageController _storageController;
   late final StreamService _streamService;
-  late final XprimeScraper _xprimeScraper;
+
+  /// The [OmssSource] the player is currently playing. Set from
+  /// [PlayerScreenArgs.initialSource] on init and updated when the user
+  /// switches sources via the Sources sheet. The synthesized
+  /// [_activeStreamResult] is derived from this.
+  late OmssSource _activeSource;
+
+  /// The [StreamResult] the rest of the player reads from. Synthesized
+  /// once per source change from the active [OmssSource] +
+  /// [OmssResponse.subtitles] so the deep playback code
+  /// (subtitles, qualities, captions, headers) keeps working unchanged.
+  late StreamResult _activeStreamResult;
 
   /// When true, player only allows landscape orientations (auto-flips between
   /// left/right). When false, follows the device — phones can stay portrait.
@@ -177,15 +214,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// top-right is the only affordance until the user taps it.
   bool _controlsLocked = false;
 
-  String get _scrapeMediaType => widget.args.mediaItem.isShow ? 'show' : 'movie';
-
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _storageController = ref.read(storageControllerProvider);
     _streamService = ref.read(streamServiceProvider);
-    _xprimeScraper = const XprimeScraper();
+    _activeSource = widget.args.initialSource;
+    _omssResponse = widget.args.omssResponse;
+    _activeStreamResult = _synthesizeStreamResult(
+      _omssResponse,
+      _activeSource,
+    );
     _applyUserPlaybackPrefs();
     _applyPlayerChrome();
     _bindPlayerStreams();
@@ -213,23 +253,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (a.replaceEpoch != b.replaceEpoch) {
       return true;
     }
-    return _streamPlaybackIdentity(a.streamResult) !=
-        _streamPlaybackIdentity(b.streamResult);
-  }
-
-  /// Distinguishes scrape responses for [didUpdateWidget] (not full equality).
-  static String _streamPlaybackIdentity(StreamResult r) {
-    final String url = (r.stream.playbackUrl?.trim().isNotEmpty == true)
-        ? r.stream.playbackUrl!.trim()
-        : ((r.stream.proxiedPlaylist?.trim().isNotEmpty == true)
-            ? r.stream.proxiedPlaylist!.trim()
-            : ((r.stream.playlist?.trim().isNotEmpty == true)
-                ? r.stream.playlist!.trim()
-                : (r.stream.id?.trim() ?? '')));
-    final String embed = (r.embedId != null && r.embedId!.trim().isNotEmpty)
-        ? r.embedId!.trim()
-        : '';
-    return '${r.sourceId}|$embed|${r.sourceName}|$url';
+    return _activeStreamResult.stream.playbackUrl !=
+        _synthesizeStreamResult(b.omssResponse, b.initialSource)
+            .stream
+            .playbackUrl;
   }
 
   Future<void> _reloadStreamForUpdatedPlaybackArgs() async {
@@ -252,6 +279,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _buffering = true;
       _activeExternalOfferId = null;
       _activeExternalSummary = null;
+      // Resync the synthesized stream result from the new args.
+      _activeSource = widget.args.initialSource;
+      _activeStreamResult = _synthesizeStreamResult(
+        widget.args.omssResponse,
+        _activeSource,
+      );
     });
     _resumeFromOverride = resume > 0 ? resume : null;
     _resumeApplied = false;
@@ -293,7 +326,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _progressTimer?.cancel();
     _subtitleToastTimer?.cancel();
     _gestureHintTimer?.cancel();
-    _sourceProbeUi.dispose();
     _playerSettingsLabelRev.dispose();
     unawaited(_restoreScreenBrightness());
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
@@ -659,7 +691,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// Loads remote captions through our HTTP stack (headers + UA) into cache so
   /// libmpv reads a `file://` track — many hosts reject anonymous subtitle URLs.
   Future<SubtitleTrack> _subtitleTrackForCaption(StreamCaption caption) async {
-    final StreamPlayback playback = widget.args.streamResult.stream;
+    final StreamPlayback playback = _activeStreamResult.stream;
     final String rawUrl = caption.url?.trim() ?? '';
     if (rawUrl.isEmpty) {
       return SubtitleTrack.uri(
@@ -847,11 +879,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<void> _openStream({int? resumeFrom}) async {
-    final StreamPlayback playback = widget.args.streamResult.stream;
+    final StreamPlayback playback = _activeStreamResult.stream;
     final String? url = _selectedQualityUrl ?? _resolvePlayableUrl(playback);
-    final Map<String, String> headers = url == null
-        ? const <String, String>{}
-        : _resolvedPlaybackHeaders(playback, url);
+    // cinepro sets Referer / Origin / User-Agent server-side on the proxy URL.
+    // The app passes no headers; libmpv opens the URL as-is.
+    const Map<String, String> headers = <String, String>{};
 
     if (url == null || url.isEmpty) {
       if (!mounted) {
@@ -904,6 +936,58 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _playbackError = '$error';
       });
     }
+  }
+
+  /// Builds the [StreamResult] the rest of the player reads from, given
+  /// the active [OmssSource] and the surrounding [OmssResponse]. The
+  /// player's deep subtitle / quality / caption code is built around
+  /// [StreamResult]; synthesizing one from the OMSS shape keeps those
+  /// code paths untouched.
+  ///
+  /// cinepro returns a single playable URL per source (no qualities
+  /// map), so the synthesized `StreamPlayback.qualities` is empty.
+  /// `headers` / `preferredHeaders` are empty — the cinepro proxy sets
+  /// Referer / Origin / User-Agent server-side.
+  static StreamResult _synthesizeStreamResult(
+    OmssResponse response,
+    OmssSource source,
+  ) {
+    final List<StreamCaption> captions = response.subtitles
+        .map((OmssSubtitle s) {
+          return StreamCaption(
+            url: s.url,
+            language: null,
+            type: s.format,
+            label: s.label,
+            raw: <String, dynamic>{
+              'url': s.url,
+              'label': s.label,
+              'format': s.format,
+            },
+          );
+        })
+        .toList(growable: false);
+
+    return StreamResult(
+      sourceId: source.providerId,
+      sourceName: source.providerName,
+      embedId: null,
+      embedName: null,
+      stream: StreamPlayback(
+        id: 'omss-${source.providerId}',
+        type: source.type,
+        playlist: source.type == 'hls' ? source.url : null,
+        proxiedPlaylist: null,
+        playbackUrl: source.url,
+        playbackType: source.type,
+        selectedQuality: source.quality,
+        qualities: const <String, StreamQuality>{},
+        headers: const <String, String>{},
+        preferredHeaders: const <String, String>{},
+        captions: captions,
+        flags: const <String>[],
+      ),
+    );
   }
 
   Future<void> _seekToResumePositionIfNeeded() async {
@@ -1123,204 +1207,101 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
-  /// Per-source stream checks for the Sources sheet. State lives on
-  /// [PlayerScreen] so the scrape loop continues after the bottom sheet is
-  /// popped; we only stop if the user leaves the player ([mounted] is false).
-  /// Progress uses [_sourceProbeUi] so the open sheet still repaints: modal
-  /// routes are not children of this [setState], so a notifier is required
-  /// for live ticks while the probe runs in the background.
-  Future<void> _runSourceProbeForCatalog(
-    List<ScrapeSourceDefinition> sources,
-  ) async {
-    if (_sourceProbeScanRunning) {
-      return;
-    }
+  /// Refreshes the cached OMSS response and replaces [_omssResponse].
+  /// cinepro returns every playable source in a single HTTP GET, so there
+  /// is no per-source probe to run — but a fresh fetch may surface
+  /// different providers when one is temporarily down.
+  Future<void> _runSourceProbeForCatalog() async {
     if (!mounted) {
       return;
     }
-    _sourceProbeScanRunning = true;
-    _sourceProbeUi.value++;
-    for (final ScrapeSourceDefinition s in sources) {
-      if (!mounted) {
-        break;
-      }
-      _sourceProbeStatus[s.id] = _SourceStreamStatus.loading;
-      _sourceProbeUi.value++;
-      try {
-        final StreamResult? r = await _scrapeResultForSource(s);
-        if (!mounted) {
-          break;
-        }
-        _sourceProbeStatus[s.id] = (r != null && _streamResultHasPlayableUrl(r))
-            ? _SourceStreamStatus.playable
-            : _SourceStreamStatus.none;
-        _sourceProbeUi.value++;
-      } catch (_) {
-        if (!mounted) {
-          break;
-        }
-        _sourceProbeStatus[s.id] = _SourceStreamStatus.none;
-        _sourceProbeUi.value++;
-      }
-    }
-    _sourceProbeScanRunning = false;
-    if (mounted) {
-      _sourceProbeUi.value++;
-    }
-  }
-
-  bool _isXprimeSource(ScrapeSourceDefinition source) {
-    return source.id.startsWith('xprime:');
-  }
-
-  String? _xprimeProviderForSource(ScrapeSourceDefinition source) {
-    if (!_isXprimeSource(source)) {
-      return null;
-    }
-    final String provider = source.id.substring('xprime:'.length).trim();
-    if (provider.isEmpty || provider == 'auto') {
-      return null;
-    }
-    return provider;
-  }
-
-  Future<StreamResult?> _scrapeResultForSource(
-    ScrapeSourceDefinition source,
-  ) async {
-    if (_isXprimeSource(source)) {
-      return _xprimeScraper.scrape(
-        context: context,
-        tmdbId: '${widget.args.mediaItem.tmdbId}',
-        title: widget.args.mediaItem.title,
-        year: widget.args.mediaItem.year,
+    setState(() {
+      _refreshingSources = true;
+    });
+    try {
+      final OmssResponse fresh = await _streamService.fetchSources(
+        widget.args.mediaItem,
         season: widget.args.season,
         episode: widget.args.episode,
-        provider: _xprimeProviderForSource(source),
       );
+      if (!mounted) {
+        return;
+      }
+      _omssResponse = fresh;
+    } catch (_) {
+      if (mounted) {
+        _setSubtitleState(
+          enabled: _subtitlesEnabled,
+          message: "Couldn't refresh sources",
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _refreshingSources = false;
+        });
+      }
     }
-
-    return _streamService.scrapeSingleSource(
-      widget.args.mediaItem,
-      selectedId: source.id,
-      selectedType: source.type,
-      parentSourceId: widget.args.streamResult.sourceId,
-      season: widget.args.season,
-      episode: widget.args.episode,
-      seasonTmdbId: widget.args.seasonTmdbId,
-      episodeTmdbId: widget.args.episodeTmdbId,
-      seasonTitle: widget.args.seasonTitle,
-    );
   }
+
+  /// True while the Sources sheet's "Refresh sources" button is in flight.
+  bool _refreshingSources = false;
+
+  /// The most recent OMSS response; initialized from
+  /// [PlayerScreenArgs.omssResponse] on init and re-assigned by
+  /// [_runSourceProbeForCatalog] when the user refreshes.
+  late OmssResponse _omssResponse;
 
   Future<void> _openSourceSheet() async {
     _showControls();
-    final ScrapeSourceDefinition? selectedSource =
-        await _showPlayerSheet<ScrapeSourceDefinition>(
+    final OmssSource? selectedSource = await _showPlayerSheet<OmssSource>(
       builder: (BuildContext context) {
         return _PlayerSheetScaffold(
-          child: FutureBuilder<ScrapeCatalog>(
-            future: _streamService.fetchCatalog(),
-            builder:
-                (BuildContext context, AsyncSnapshot<ScrapeCatalog> snapshot) {
-                  if (snapshot.connectionState != ConnectionState.done) {
-                    return const Padding(
-                      padding: EdgeInsets.all(AppSpacing.x6),
-                      child: Center(child: CircularProgressIndicator()),
-                    );
-                  }
-
-                  final List<ScrapeSourceDefinition> backendSources =
-                      (snapshot.data?.sources ?? const <ScrapeSourceDefinition>[])
-                          .where(
-                            (ScrapeSourceDefinition source) =>
-                                source.supportsMediaType(_scrapeMediaType),
-                          )
-                          .toList();
-                  // Priority order: Vidsrc -> Granite (vidrock) -> Vidlink -> XPrime -> others
-                  final List<String> sourcePriority = <String>[
-                    'vidsrc',
-                    'granite',
-                    'vidlink',
-                  ];
-                  final List<ScrapeSourceDefinition> sortedBackendSources =
-                      List<ScrapeSourceDefinition>.from(backendSources);
-                  sortedBackendSources.sort((ScrapeSourceDefinition a, ScrapeSourceDefinition b) {
-                    final int indexA = sourcePriority.indexOf(a.id);
-                    final int indexB = sourcePriority.indexOf(b.id);
-                    final int priorityA = indexA >= 0 ? indexA : 999;
-                    final int priorityB = indexB >= 0 ? indexB : 999;
-                    if (priorityA != priorityB) {
-                      return priorityA.compareTo(priorityB);
-                    }
-                    return a.name.compareTo(b.name);
-                  });
-                  final List<ScrapeSourceDefinition> sources =
-                      <ScrapeSourceDefinition>[
-                    ...sortedBackendSources,
-                    ...XprimeScraper.sourceDefinitions,
-                  ];
-
-                  return _PlayerOptionSheet(
-                    title: 'Sources',
-                    trailingText: 'Find next source',
-                    onBack: () => Navigator.of(context).pop(),
-                    onTrailingTap: () async {
-                      final NavigatorState modalNavigator = Navigator.of(
-                        context,
-                      );
-                      final NavigatorState screenNavigator = Navigator.of(
-                        this.context,
-                      );
-                      await _persistProgress();
-                      if (!mounted) {
-                        return;
-                      }
-                      modalNavigator.pop();
-                      await screenNavigator.pushReplacement(
-                        MaterialPageRoute<void>(
-                          builder: (_) => ScrapingScreen(
-                            mediaItem: widget.args.mediaItem,
-                            season: widget.args.season,
-                            episode: widget.args.episode,
-                            seasonTmdbId: widget.args.seasonTmdbId,
-                            episodeTmdbId: widget.args.episodeTmdbId,
-                            seasonTitle: widget.args.seasonTitle,
-                            resumeFrom: _position.inSeconds,
-                          ),
-                        ),
-                      );
-                    },
-                    child: ValueListenableBuilder<int>(
-                      valueListenable: _sourceProbeUi,
-                      builder: (
-                        BuildContext context,
-                        int _,
-                        Widget? child,
-                      ) {
-                        return _SourcesCatalogSheet(
-                          sources: sources,
-                          currentSourceId: _currentCatalogSourceId,
-                          sourceProbeStatus: _sourceProbeStatus,
-                          sourceProbeScanRunning: _sourceProbeScanRunning,
-                          switchingSourceId: _pendingSourceId,
-                          onCheckSources: () {
-                            unawaited(_runSourceProbeForCatalog(sources));
-                          },
-                          onPick: (ScrapeSourceDefinition source) {
-                            Navigator.of(context).pop(source);
-                          },
-                        );
-                      },
-                    ),
-                  );
-                },
+          child: _PlayerOptionSheet(
+            title: 'Sources',
+            trailingText: 'Find next source',
+            onBack: () => Navigator.of(context).pop(),
+            onTrailingTap: () async {
+              final NavigatorState modalNavigator = Navigator.of(context);
+              final NavigatorState screenNavigator = Navigator.of(this.context);
+              await _persistProgress();
+              if (!mounted) {
+                return;
+              }
+              modalNavigator.pop();
+              await screenNavigator.pushReplacement(
+                MaterialPageRoute<void>(
+                  builder: (_) => ScrapingScreen(
+                    mediaItem: widget.args.mediaItem,
+                    season: widget.args.season,
+                    episode: widget.args.episode,
+                    seasonTmdbId: widget.args.seasonTmdbId,
+                    episodeTmdbId: widget.args.episodeTmdbId,
+                    seasonTitle: widget.args.seasonTitle,
+                    resumeFrom: _position.inSeconds,
+                  ),
+                ),
+              );
+            },
+            child: _SourcesCatalogSheet(
+              sources: _omssResponse.sources,
+              currentSourceId: _activeSource.providerId,
+              refreshing: _refreshingSources,
+              switchingSourceId: _pendingSourceId,
+              onRefreshSources: () {
+                unawaited(_runSourceProbeForCatalog());
+              },
+              onPick: (OmssSource source) {
+                Navigator.of(context).pop(source);
+              },
+            ),
           ),
         );
       },
     );
 
     if (selectedSource == null ||
-        selectedSource.id == _currentCatalogSourceId) {
+        selectedSource.providerId == _activeSource.providerId) {
       return;
     }
 
@@ -1367,7 +1348,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                           final bool isSelected =
                               _selectedQualityKey == quality.key ||
                               (_selectedQualityKey == null &&
-                                  widget.args.streamResult.stream
+                                  _activeStreamResult.stream
                                           .selectedQuality ==
                                       quality.key);
 
@@ -1388,7 +1369,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                           vertical: AppSpacing.x6,
                         ),
                         child: Text(
-                          'This source did not expose multiple stream qualities. '
+                          'This source exposes a single stream quality. '
                           'The player is using the source default.',
                           textAlign: TextAlign.left,
                           style: TextStyle(color: AppColors.typeSecondary),
@@ -1973,55 +1954,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
-  Future<void> _switchSource(ScrapeSourceDefinition source) async {
+  Future<void> _switchSource(OmssSource source) async {
     if (!mounted) {
       return;
     }
 
     setState(() {
       _sourceSwitching = true;
-      _pendingSourceId = source.id;
-      _pendingSourceLabel = source.name;
+      _pendingSourceId = source.providerId;
+      _pendingSourceLabel = source.providerName;
     });
     _playerSettingsLabelRev.value++;
 
     try {
       await _persistProgress();
-      final StreamResult? result = await _scrapeResultForSource(source);
-
       if (!mounted) {
         return;
       }
 
-      if (result == null) {
-        setState(() {
-          _sourceSwitching = false;
-          _pendingSourceId = null;
-          _pendingSourceLabel = null;
-        });
-        _playerSettingsLabelRev.value++;
-        _setSubtitleState(
-          enabled: _subtitlesEnabled,
-          message: 'Source did not return a playable stream',
-        );
-        return;
-      }
-
-      if (!_streamResultHasPlayableUrl(result)) {
-        setState(() {
-          _sourceSwitching = false;
-          _pendingSourceId = null;
-          _pendingSourceLabel = null;
-        });
-        _playerSettingsLabelRev.value++;
-        _setSubtitleState(
-          enabled: _subtitlesEnabled,
-          message: 'Source returned no playable URL',
-        );
-        return;
-      }
-
-      _navigateReplacePlayerWithResult(result);
+      // cinepro already validated the URL when it returned this source in
+      // the OmssResponse. No re-scrape, no headers — just push a fresh
+      // PlayerScreenArgs pointing at the new source.
+      _navigateReplacePlayerWithResult(source);
     } catch (error) {
       if (!mounted) {
         return;
@@ -2748,13 +2702,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   List<StreamCaption> get _availableCaptions {
-    return widget.args.streamResult.stream.captions
+    return _activeStreamResult.stream.captions
         .where((StreamCaption caption) => caption.url?.isNotEmpty == true)
         .toList(growable: false);
   }
 
   List<MapEntry<String, StreamQuality>> get _availableQualities {
-    return widget.args.streamResult.stream.qualities.entries
+    return _activeStreamResult.stream.qualities.entries
         .where((MapEntry<String, StreamQuality> entry) {
           return entry.value.url?.isNotEmpty == true;
         })
@@ -2831,11 +2785,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return list;
   }
 
-  bool _streamResultHasPlayableUrl(StreamResult result) {
-    return _resolvePlayableUrl(result.stream) != null;
-  }
-
-  void _navigateReplacePlayerWithResult(StreamResult result) {
+  void _navigateReplacePlayerWithResult(OmssSource source) {
     if (!mounted) {
       return;
     }
@@ -2849,7 +2799,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       ).toString(),
       extra: PlayerScreenArgs(
         mediaItem: widget.args.mediaItem,
-        streamResult: result,
+        omssResponse: _omssResponse,
+        initialSourceIndex: _omssResponse.sources.indexOf(source),
         season: widget.args.season,
         episode: widget.args.episode,
         seasonTmdbId: widget.args.seasonTmdbId,
@@ -2861,34 +2812,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
-  /// Active top-level source for the current playback session.
-  String get _currentCatalogSourceId {
-    if (_sourceSwitching &&
-        _pendingSourceId != null &&
-        _pendingSourceId!.trim().isNotEmpty) {
-      return _pendingSourceId!.trim();
-    }
-    return widget.args.streamResult.sourceId;
-  }
-
   String get _sourceLabelForSettings {
     if (_sourceSwitching &&
         _pendingSourceLabel != null &&
         _pendingSourceLabel!.trim().isNotEmpty) {
       return '${_pendingSourceLabel!.trim()}...';
     }
-    final StreamResult r = widget.args.streamResult;
-    final String sourceName = r.sourceName.trim();
-    final String embedName = r.embedName?.trim() ?? '';
-    if (embedName.isNotEmpty && embedName != sourceName) {
-      return '$sourceName • $embedName';
-    }
-    return sourceName;
+    return _activeSource.providerName;
   }
 
   String get _currentQualityLabel {
     return _selectedQualityKey ??
-        widget.args.streamResult.stream.selectedQuality ??
+        _activeStreamResult.stream.selectedQuality ??
         (_availableQualities.isNotEmpty
             ? _availableQualities.first.key
             : 'Auto');
@@ -2979,7 +2914,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     final int resumeFrom = _position.inSeconds;
     final String? qualityUrl = qualityKey == null
         ? null
-        : widget.args.streamResult.stream.qualities[qualityKey]?.url;
+        : _activeStreamResult.stream.qualities[qualityKey]?.url;
 
     if (qualityKey != null && (qualityUrl == null || qualityUrl.isEmpty)) {
       _setSubtitleState(
@@ -3091,20 +3026,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
     return null;
   }
-
-  Map<String, String> _resolvedPlaybackHeaders(
-    StreamPlayback playback,
-    String url,
-  ) {
-    final Uri? uri = Uri.tryParse(url);
-    final String host = uri?.host.toLowerCase() ?? '';
-    if (host == 'veil-m3u8-proxy.veilproxy.workers.dev') {
-      return const <String, String>{};
-    }
-    return playback.preferredHeaders.isNotEmpty
-        ? playback.preferredHeaders
-        : playback.headers;
-  }
 }
 
 class _PlayerBackdrop extends StatelessWidget {
@@ -3183,54 +3104,26 @@ class _NextEpisodeTarget {
   final String label;
 }
 
-/// Source list with optional per-source scrape probe (tick / cross only — no auto-switch).
-/// Probe state is held on [PlayerScreen] so checks continue if this sheet is closed.
+/// Source list backed by the cached OMSS v1.0 response. The refresh
+/// button re-issues the same `GET /v1/...` against the resolver; per-
+/// source probes are not needed because every source already carries
+/// a playable URL.
 class _SourcesCatalogSheet extends StatelessWidget {
   const _SourcesCatalogSheet({
     required this.sources,
     required this.currentSourceId,
-    required this.sourceProbeStatus,
-    required this.sourceProbeScanRunning,
+    required this.refreshing,
     required this.switchingSourceId,
-    required this.onCheckSources,
+    required this.onRefreshSources,
     required this.onPick,
   });
 
-  final List<ScrapeSourceDefinition> sources;
+  final List<OmssSource> sources;
   final String currentSourceId;
-  final Map<String, _SourceStreamStatus> sourceProbeStatus;
-  final bool sourceProbeScanRunning;
+  final bool refreshing;
   final String? switchingSourceId;
-  final VoidCallback onCheckSources;
-  final void Function(ScrapeSourceDefinition source) onPick;
-
-  Widget _trailing(String sourceId) {
-    final _SourceStreamStatus st =
-        sourceProbeStatus[sourceId] ?? _SourceStreamStatus.unknown;
-    switch (st) {
-      case _SourceStreamStatus.unknown:
-        return const SizedBox(width: AppSpacing.x8);
-      case _SourceStreamStatus.loading:
-        return const SizedBox(
-          width: AppSpacing.x6,
-          height: AppSpacing.x6,
-          child: Padding(
-            padding: EdgeInsets.all(2),
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        );
-      case _SourceStreamStatus.playable:
-        return const Icon(
-          Icons.check_circle_rounded,
-          color: AppColors.typeEmphasis,
-        );
-      case _SourceStreamStatus.none:
-        return const Icon(
-          Icons.cancel_rounded,
-          color: AppColors.videoContextError,
-        );
-    }
-  }
+  final VoidCallback onRefreshSources;
+  final void Function(OmssSource source) onPick;
 
   @override
   Widget build(BuildContext context) {
@@ -3243,9 +3136,9 @@ class _SourcesCatalogSheet extends StatelessWidget {
             shrinkWrap: true,
             itemCount: sources.length,
             itemBuilder: (BuildContext context, int index) {
-              final ScrapeSourceDefinition source = sources[index];
-              final bool isCurrent = source.id == currentSourceId;
-              final bool isSwitching = source.id == switchingSourceId;
+              final OmssSource source = sources[index];
+              final bool isCurrent = source.providerId == currentSourceId;
+              final bool isSwitching = source.providerId == switchingSourceId;
               return Material(
                 color: Colors.transparent,
                 child: InkWell(
@@ -3263,7 +3156,7 @@ class _SourcesCatalogSheet extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: <Widget>[
                               Text(
-                                source.name,
+                                source.providerName,
                                 style: Theme.of(context)
                                     .textTheme
                                     .titleMedium
@@ -3272,6 +3165,14 @@ class _SourcesCatalogSheet extends StatelessWidget {
                                           ? AppColors.typeEmphasis
                                           : AppColors.typeText,
                                     ),
+                              ),
+                              const SizedBox(height: AppSpacing.x1),
+                              Text(
+                                _subtitleFor(source),
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelSmall
+                                    ?.copyWith(color: AppColors.typeSecondary),
                               ),
                               if (isSwitching)
                                 Text(
@@ -3309,7 +3210,6 @@ class _SourcesCatalogSheet extends StatelessWidget {
                               color: AppColors.purpleC100,
                             ),
                           ),
-                        if (!isSwitching) _trailing(source.id),
                       ],
                     ),
                   ),
@@ -3320,24 +3220,31 @@ class _SourcesCatalogSheet extends StatelessWidget {
         ),
         const Divider(color: AppColors.utilsDivider, height: AppSpacing.x4),
         Text(
-          'Checks each source for this title/episode. '
-          'Tick = a playable stream was returned. Cross = none. Does not change the active source. '
-          'The check continues in the background if you close this panel.',
+          'cinepro returned these playable sources for this title. '
+          'Pick one to switch. "Refresh sources" re-issues the same request '
+          'in case a previously unavailable provider is back.',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: AppColors.typeSecondary,
               ),
         ),
         const SizedBox(height: AppSpacing.x2),
         TextButton(
-          onPressed: sourceProbeScanRunning ? null : onCheckSources,
+          onPressed: refreshing ? null : onRefreshSources,
           child: Text(
-            sourceProbeScanRunning
-                ? 'Checking…'
-                : 'Check which sources have streams',
+            refreshing ? 'Refreshing…' : 'Refresh sources',
           ),
         ),
       ],
     );
+  }
+
+  String _subtitleFor(OmssSource source) {
+    final String type = source.type.toUpperCase();
+    final String? quality = source.quality;
+    if (quality == null || quality.isEmpty) {
+      return type;
+    }
+    return '$quality · $type';
   }
 }
 
