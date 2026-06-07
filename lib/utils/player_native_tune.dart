@@ -1,7 +1,7 @@
-/// No-op stubs: video_player (ExoPlayer) handles playback tuning natively.
-///
-/// These functions existed for media_kit/libmpv property injection. Kept as
-/// no-ops so any stale call-sites compile without error until fully removed.
+// No-op stubs: video_player (ExoPlayer) handles playback tuning natively.
+//
+// These functions existed for media_kit/libmpv property injection. Kept as
+// no-ops so any stale call-sites compile without error until fully removed.
 
 /// Previously configured libmpv demuxer/volume-max properties.
 Future<void> applyNativePlaybackTune(dynamic player) async {
