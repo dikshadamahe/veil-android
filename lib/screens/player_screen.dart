@@ -8,8 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import 'package:video_player/video_player.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pstream_android/config/app_config.dart';
 import 'package:pstream_android/config/breakpoints.dart';
@@ -26,7 +25,7 @@ import 'package:pstream_android/screens/scraping_screen.dart';
 import 'package:pstream_android/services/external_subtitle_service.dart';
 import 'package:pstream_android/services/stream_service.dart';
 import 'package:pstream_android/storage/local_storage.dart';
-import 'package:pstream_android/utils/player_native_tune.dart';
+
 import 'package:pstream_android/widgets/player_controls.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 
@@ -143,11 +142,12 @@ class PlayerScreen extends ConsumerStatefulWidget {
 
 class _PlayerScreenState extends ConsumerState<PlayerScreen>
     with WidgetsBindingObserver {
-  late final Player _player;
-  late final VideoController _videoController;
+  VideoPlayerController? _controller;
 
-  final List<StreamSubscription<dynamic>> _subscriptions =
-      <StreamSubscription<dynamic>>[];
+  /// Parsed subtitle entries from the active caption file.
+  List<Caption> _parsedCaptions = const <Caption>[];
+  /// Current subtitle text to display, updated every position tick.
+  String _currentSubtitleText = '';
   Timer? _controlsHideTimer;
   Timer? _progressTimer;
   String? _subtitleToast;
@@ -233,7 +233,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// "jumping" reported by users.
   bool _hasFirstVideoFrame = false;
 
-  /// Fires after [_player.open] if no video frame arrives within a
+  /// Fires after [_openStream] if no video frame arrives within a
   /// deadline.  Automatically retries with software decoding.
   Timer? _videoStallTimer;
 
@@ -263,15 +263,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Map<String, Object?> _debugPlayerStateSnapshot() {
     try {
-      final state = _player.state;
+      final VideoPlayerValue? v = _controller?.value;
+      if (v == null) {
+        return const <String, Object?>{'state': 'no_controller'};
+      }
       return <String, Object?>{
-        'statePlaying': state.playing,
-        'stateBuffering': state.buffering,
-        'bufferPct': state.bufferingPercentage.toStringAsFixed(1),
-        'videoSize': '${state.width ?? 0}x${state.height ?? 0}',
-        'videoTracks': state.tracks.video.length,
-        'audioTracks': state.tracks.audio.length,
-        'subtitleTracks': state.tracks.subtitle.length,
+        'statePlaying': v.isPlaying,
+        'stateBuffering': v.isBuffering,
+        'videoSize': '${v.size.width.toInt()}x${v.size.height.toInt()}',
       };
     } catch (_) {
       return const <String, Object?>{'state': 'unavailable'};
@@ -314,21 +313,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _activeSource,
     );
 
-    final bool enableHw = ref.read(hardwareAccelerationPrefProvider);
-    _player = Player(
-      configuration: const PlayerConfiguration(
-        title: 'Veil',
-        bufferSize: 64 * 1024 * 1024,
-      ),
-    );
-    _videoController = VideoController(
-      _player,
-      configuration: VideoControllerConfiguration(
-        enableHardwareAcceleration: enableHw,
-      ),
-    );
     _debugPlayer('init', <String, Object?>{
-      'hardwarePref': enableHw,
       'media': widget.args.mediaItem.hiveKey(),
       ..._debugSourceFields(),
     });
@@ -439,9 +424,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         refresh: true,
       ),
     );
-    for (final StreamSubscription<dynamic> subscription in _subscriptions) {
-      subscription.cancel();
-    }
+    _controller?.removeListener(_onControllerUpdate);
+    _controller?.dispose();
     _controlsHideTimer?.cancel();
     _progressTimer?.cancel();
     _subtitleToastTimer?.cancel();
@@ -454,7 +438,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       SystemUiMode.manual,
       overlays: SystemUiOverlay.values,
     );
-    unawaited(_player.dispose());
+
     super.dispose();
   }
 
@@ -631,67 +615,89 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         haystack.contains('hearing');
   }
 
-  /// Push the user's saved subtitle style (size / text color / background
-  /// opacity) into the native libmpv player. Called both right after a
-  /// stream opens and again whenever the Customize sheet writes a new pref.
-  ///
-  /// We also push the same style to Flutter's [SubtitleView] via
-  /// [_buildSubtitleViewConfiguration] so the on-screen subtitle render is
-  /// guaranteed correct even when libmpv's hardware decoder bypasses the
-  /// `sub-*` properties.
   Future<void> _applyNativeSubtitleStyleFromPrefs() async {
-    await applyNativeSubtitleStyle(
-      _player,
-      size: LocalStorage.getSubtitleSize(),
-      colorHex: LocalStorage.getSubtitleColor(),
-      bgOpacity: LocalStorage.getSubtitleBgOpacity(),
-    );
+    // Subtitle styling is handled by the custom overlay in build().
+    // Re-trigger a rebuild so the overlay picks up new prefs.
+    if (mounted) {
+      setState(() {});
+    }
   }
 
-  /// Build a [SubtitleViewConfiguration] using live Hive prefs. Watching
-  /// the Riverpod providers in [build] makes the [Video] widget rebuild
-  /// the moment the user nudges a slider in the Customize sheet.
-  ///
-  /// The player mounts a [SubtitleView] *above* [PlayerControls] so
-  /// subtitles are not covered; the [Video] child uses
-  /// [displayVisible] false to avoid painting two copies.
-  SubtitleViewConfiguration _buildSubtitleViewConfiguration(
-    WidgetRef ref, {
-    bool displayVisible = true,
-    bool liftAboveControlChrome = false,
-  }) {
-    final int size = ref.watch(subtitleSizePrefProvider);
-    final String colorHex = ref.watch(subtitleColorPrefProvider);
-    final double bgOpacity = ref.watch(subtitleBgOpacityPrefProvider);
-    final Color textColor = _hexToColorPlayer(colorHex);
-    // Keep lines readable above the bottom seek bar + icon row when the
-    // control chrome is visible; z-order is handled by the top SubtitleView.
-    final double bottom = AppSpacing.x6 +
-        (liftAboveControlChrome
-            ? AppSpacing.x20 + AppSpacing.x10
-            : 0.0);
-    return SubtitleViewConfiguration(
-      visible: displayVisible,
-      style: TextStyle(
-        color: textColor,
-        fontSize: size.toDouble(),
-        fontWeight: FontWeight.w600,
-        height: 1.3,
-        letterSpacing: 0,
-        backgroundColor: Colors.black.withValues(alpha: bgOpacity),
-        shadows: const <Shadow>[
-          Shadow(color: Colors.black, blurRadius: 2, offset: Offset(0, 1)),
-        ],
-      ),
-      textAlign: TextAlign.center,
-      padding: EdgeInsets.fromLTRB(
-        AppSpacing.x4,
-        AppSpacing.x6,
-        AppSpacing.x4,
-        bottom,
-      ),
-    );
+  /// Parse a local subtitle file (VTT or SRT) and populate [_parsedCaptions].
+  /// The file must already exist on disk (downloaded by [_subtitleTrackForCaption]).
+  Future<void> _loadAndApplySubtitleFile(String filePathOrUrl) async {
+    try {
+      String content;
+      if (filePathOrUrl.startsWith('file://')) {
+        final File f = File(filePathOrUrl.replaceFirst('file://', ''));
+        content = await f.readAsString();
+      } else if (filePathOrUrl.startsWith('http://') ||
+                 filePathOrUrl.startsWith('https://')) {
+        final http.Response r = await http
+            .get(Uri.parse(filePathOrUrl))
+            .timeout(const Duration(seconds: 20));
+        if (r.statusCode != 200 || r.bodyBytes.isEmpty) {
+          _debugPlayer('subtitle.download_fail', <String, Object?>{
+            'status': r.statusCode,
+          });
+          return;
+        }
+        content = r.body;
+      } else {
+        final File f = File(filePathOrUrl);
+        content = await f.readAsString();
+      }
+
+      // Detect format and parse using video_player's built-in parsers.
+      ClosedCaptionFile parsed;
+      final String trimmed = content.trimLeft();
+      if (trimmed.startsWith('WEBVTT') ||
+          filePathOrUrl.contains('.vtt')) {
+        parsed = WebVTTCaptionFile(content);
+      } else {
+        parsed = SubRipCaptionFile(content);
+      }
+
+      _debugPlayer('subtitle.loaded', <String, Object?>{
+        'entries': parsed.captions.length,
+        'source': filePathOrUrl.length > 60
+            ? '...${filePathOrUrl.substring(filePathOrUrl.length - 40)}'
+            : filePathOrUrl,
+      });
+
+      if (mounted) {
+        setState(() {
+          _parsedCaptions = parsed.captions;
+          _currentSubtitleText = '';
+        });
+      }
+    } catch (e) {
+      _debugPlayer('subtitle.parse_error', <String, Object?>{'error': '$e'});
+      if (mounted) {
+        setState(() {
+          _parsedCaptions = const <Caption>[];
+          _currentSubtitleText = '';
+        });
+      }
+    }
   }
+
+  /// Clear active subtitles.
+  void _clearParsedSubtitles() {
+    _parsedCaptions = const <Caption>[];
+    _currentSubtitleText = '';
+  }
+
+  /// Find the caption entry matching the current playback position.
+  String _captionForPosition(Duration position) {
+    for (final Caption c in _parsedCaptions) {
+      if (position >= c.start && position <= c.end) {
+        return c.text;
+      }
+    }
+    return '';
+  }
+
 
   /// Hex parser for `#AARRGGBB`. Same logic as the customize sheet but
   /// kept duplicated here so the player file does not have to import the
@@ -811,15 +817,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// Loads remote captions through our HTTP stack (headers + UA) into cache so
   /// libmpv reads a `file://` track — many hosts reject anonymous subtitle URLs.
-  Future<SubtitleTrack> _subtitleTrackForCaption(StreamCaption caption) async {
+  /// Loads remote captions through our HTTP stack (headers + UA) into cache.
+  /// Returns the resolved subtitle file URI string, or null if unavailable.
+  /// TODO: integrate with video_player's setClosedCaptionFile when supported.
+  Future<String?> _subtitleTrackForCaption(StreamCaption caption) async {
     final StreamPlayback playback = _activeStreamResult.stream;
     final String rawUrl = caption.url?.trim() ?? '';
     if (rawUrl.isEmpty) {
-      return SubtitleTrack.uri(
-        '',
-        title: caption.label ?? 'Subtitles',
-        language: caption.language ?? 'und',
-      );
+      return null;
     }
     final Uri? resolved = _resolveStreamCaptionUri(rawUrl, playback);
     final String uriStr = resolved?.toString() ?? rawUrl;
@@ -827,20 +832,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         !resolved.hasScheme ||
         resolved.scheme == 'file' ||
         (resolved.scheme != 'http' && resolved.scheme != 'https')) {
-      return SubtitleTrack.uri(
-        uriStr,
-        title: caption.label ?? caption.language ?? 'Subtitles',
-        language: caption.language ?? 'unknown',
-      );
+      return uriStr;
     }
     // Return from in-memory cache if this URL was already downloaded.
     final String cacheKey = resolved.toString();
     if (_subtitleUrlCache.containsKey(cacheKey)) {
-      return SubtitleTrack.uri(
-        _subtitleUrlCache[cacheKey]!,
-        title: caption.label ?? caption.language ?? 'Subtitles',
-        language: caption.language ?? 'unknown',
-      );
+      return _subtitleUrlCache[cacheKey]!;
     }
     final Map<String, String> headers =
         _mergedSubtitleRequestHeaders(caption, playback);
@@ -856,21 +853,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         );
         if (path != null) {
           _subtitleUrlCache[cacheKey] = 'file://$path';
-          return SubtitleTrack.uri(
-            'file://$path',
-            title: caption.label ?? caption.language ?? 'Subtitles',
-            language: caption.language ?? 'unknown',
-          );
+          return 'file://$path';
         }
       }
     } catch (_) {
       // Fall through to direct URI (may still work for open CDNs).
     }
-    return SubtitleTrack.uri(
-      uriStr,
-      title: caption.label ?? caption.language ?? 'Subtitles',
-      language: caption.language ?? 'unknown',
-    );
+    return uriStr;
   }
 
   Future<void> _applyPlayerChrome() async {
@@ -944,121 +933,103 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   void _bindPlayerStreams() {
-    _subscriptions.addAll(<StreamSubscription<dynamic>>[
-      _player.stream.position.listen((Duration value) {
-        if (!mounted) {
-          return;
-        }
-        final int bucket = value.inSeconds ~/ 5;
-        if (bucket != _lastLoggedPositionBucket) {
-          _lastLoggedPositionBucket = bucket;
-          _debugPlayer('stream.position', <String, Object?>{
-            'eventPos': value.inSeconds,
-          });
-        }
-        // libmpv emits position ~4×/s. Skip the [setState] (and the entire
-        // controls-overlay rebuild) while the chrome is hidden — the value
-        // is still cached for the next time controls are shown / progress
-        // is persisted.
-        if (!_controlsVisible) {
-          _position = value;
-          return;
-        }
-        setState(() {
-          _position = value;
+    // No-op: with video_player, we use a single listener attached
+    // per-controller in _openStream via _onControllerUpdate.
+  }
+
+  /// Unified listener for [VideoPlayerController.addListener]. Replaces the
+  /// individual stream subscriptions that media_kit used.
+  void _onControllerUpdate() {
+    if (!mounted || _controller == null) {
+      return;
+    }
+    final VideoPlayerValue v = _controller!.value;
+
+    // Position (~4×/s). Skip setState while controls are hidden.
+    if (v.position != _position) {
+      final int bucket = v.position.inSeconds ~/ 5;
+      if (bucket != _lastLoggedPositionBucket) {
+        _lastLoggedPositionBucket = bucket;
+        _debugPlayer('stream.position', <String, Object?>{
+          'eventPos': v.position.inSeconds,
         });
-      }),
-      _player.stream.duration.listen((Duration value) {
-        if (!mounted) {
-          return;
+      }
+      if (_controlsVisible) {
+        setState(() { _position = v.position; });
+      } else {
+        _position = v.position;
+      }
+    }
+
+    // Duration
+    if (v.duration != _duration && v.duration.inMilliseconds > 0) {
+      _debugPlayer('stream.duration', <String, Object?>{
+        'eventDur': v.duration.inSeconds,
+      });
+      setState(() { _duration = v.duration; });
+      if (!_resumeApplied) {
+        unawaited(_seekToResumePositionIfNeeded());
+      }
+    }
+
+    // Buffer
+    if (v.buffered.isNotEmpty) {
+      final Duration newBuffer = v.buffered.last.end;
+      if (newBuffer != _buffer) {
+        if (_controlsVisible) {
+          setState(() { _buffer = newBuffer; });
+        } else {
+          _buffer = newBuffer;
         }
-        _debugPlayer('stream.duration', <String, Object?>{
-          'eventDur': value.inSeconds,
-        });
-        setState(() {
-          _duration = value;
-        });
-        // Resume needs the source's duration to be known — seeking before
-        // libmpv reports duration is silently ignored. The earlier hook on
-        // `playing == true` fired too soon for HLS/DASH streams, so do the
-        // first seek here too as soon as a positive duration arrives.
-        if (value.inMilliseconds > 0 && !_resumeApplied) {
-          unawaited(_seekToResumePositionIfNeeded());
-        }
-      }),
-      _player.stream.buffer.listen((Duration value) {
-        if (!mounted) {
-          return;
-        }
-        final int bucket = value.inSeconds ~/ 5;
-        if (bucket != _lastLoggedBufferBucket) {
-          _lastLoggedBufferBucket = bucket;
-          _debugPlayer('stream.buffer', <String, Object?>{
-            'eventBuf': value.inSeconds,
-          });
-        }
-        if (!_controlsVisible) {
-          _buffer = value;
-          return;
-        }
-        setState(() {
-          _buffer = value;
-        });
-      }),
-      _player.stream.playing.listen((bool value) {
-        if (!mounted) {
-          return;
-        }
-        _debugPlayer('stream.playing', <String, Object?>{'eventPlaying': value});
-        setState(() {
-          _playing = value;
-        });
-        if (value) {
-          _seekToResumePositionIfNeeded();
-        }
-      }),
-      _player.stream.buffering.listen((bool value) {
-        if (!mounted) {
-          return;
-        }
-        _debugPlayer(
-          'stream.buffering',
-          <String, Object?>{'eventBuffering': value},
-        );
-        setState(() {
-          _buffering = value;
-        });
-      }),
-      _player.stream.error.listen((String value) {
-        if (!mounted || value.trim().isEmpty) {
-          return;
-        }
-        _debugPlayer('stream.error', <String, Object?>{'error': value});
-        setState(() {
-          _openingStream = false;
-          _hasPlaybackError = true;
-          _playerReady = false;
-          _buffering = false;
-          _playbackError = value;
-          _controlsLocked = false;
-          _controlsVisible = true;
-        });
-      }),
-      _player.stream.width.listen((int? value) {
-        if (!mounted) {
-          return;
-        }
-        if (value != null && value > 0 && !_hasFirstVideoFrame) {
-          _videoStallTimer?.cancel();
-          _debugPlayer('stream.firstVideoFrame', <String, Object?>{
-            'width': value,
-          });
-          setState(() {
-            _hasFirstVideoFrame = true;
-          });
-        }
-      }),
-    ]);
+      }
+    }
+
+    // Playing state
+    final bool nowPlaying = v.isPlaying;
+    if (nowPlaying != _playing) {
+      _debugPlayer('stream.playing', <String, Object?>{'eventPlaying': nowPlaying});
+      setState(() { _playing = nowPlaying; });
+      if (nowPlaying && !_resumeApplied) {
+        _seekToResumePositionIfNeeded();
+      }
+    }
+
+    // Buffering
+    if (v.isBuffering != _buffering) {
+      _debugPlayer('stream.buffering', <String, Object?>{'eventBuffering': v.isBuffering});
+      setState(() { _buffering = v.isBuffering; });
+    }
+
+    // First video frame detection
+    if (v.isInitialized && v.size != Size.zero && !_hasFirstVideoFrame) {
+      _videoStallTimer?.cancel();
+      _debugPlayer('stream.firstVideoFrame', <String, Object?>{
+        'width': v.size.width.toInt(),
+      });
+      setState(() { _hasFirstVideoFrame = true; });
+    }
+
+    // Subtitle text tracking
+    if (_subtitlesEnabled && _parsedCaptions.isNotEmpty) {
+      final String newText = _captionForPosition(v.position);
+      if (newText != _currentSubtitleText) {
+        setState(() { _currentSubtitleText = newText; });
+      }
+    }
+
+    // Error
+    if (v.hasError) {
+      _debugPlayer('stream.error', <String, Object?>{'error': v.errorDescription});
+      setState(() {
+        _openingStream = false;
+        _hasPlaybackError = true;
+        _playerReady = false;
+        _buffering = false;
+        _playbackError = v.errorDescription ?? 'Playback failed';
+        _controlsLocked = false;
+        _controlsVisible = true;
+      });
+    }
   }
 
   Future<void> _openStream({int? resumeFrom}) async {
@@ -1090,11 +1061,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
       _resumeApplied = false;
       final int? resumeStartSec = _resolvedResumeFrom;
-      final bool enableHw = ref.read(hardwareAccelerationPrefProvider);
       _debugPlayer('open.begin', <String, Object?>{
         'resumeFromArg': resumeFrom ?? 0,
         'resumeStart': resumeStartSec ?? 0,
-        'hardwarePref': enableHw,
         'url': _debugUrl(url),
         ..._debugSourceFields(),
       });
@@ -1119,49 +1088,35 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         }
       }
 
-      // Set native hwdec before open so libmpv does not select a stale decoder.
-      final PlatformPlayer? platform = _player.platform;
-      if (platform is NativePlayer) {
-        if (enableHw) {
-          await platform.setProperty('hwdec', 'mediacodec');
-          await platform.setProperty('hwdec-codecs', 'h264');
-        } else {
-          await platform.setProperty('hwdec', 'no');
-        }
-        _debugPlayer('open.hwdec_set', <String, Object?>{
-          'hwdec': enableHw ? 'mediacodec' : 'no',
-        });
-      } else {
-        _debugPlayer('open.hwdec_skipped', <String, Object?>{
-          'platform': platform.runtimeType,
+      // Dispose previous controller if any (source switch / quality change).
+      _controller?.removeListener(_onControllerUpdate);
+      _controller?.dispose();
+      _controller = null;
+
+      _debugPlayer('open.creating_controller', <String, Object?>{
+        'url': _debugUrl(url),
+      });
+      _controller = VideoPlayerController.networkUrl(
+        Uri.parse(url),
+        httpHeaders: headers,
+      );
+      _controller!.addListener(_onControllerUpdate);
+      await _controller!.initialize();
+      _debugPlayer('open.controller_initialized', <String, Object?>{
+        'elapsedMs': openWatch.elapsedMilliseconds,
+      });
+      await _controller!.setVolume((_softwareVolume / 100.0).clamp(0.0, 1.0));
+      await _controller!.play();
+      _debugPlayer('open.play_called', <String, Object?>{
+        'elapsedMs': openWatch.elapsedMilliseconds,
+      });
+      if (resumeStartSec != null && resumeStartSec > 0) {
+        await _controller!.seekTo(Duration(seconds: resumeStartSec));
+        _resumeApplied = true;
+        _debugPlayer('open.resume_seek', <String, Object?>{
+          'seekTo': resumeStartSec,
         });
       }
-
-      await _player.open(
-        Media(
-          url,
-          httpHeaders: headers,
-          start: resumeStartSec != null && resumeStartSec > 0
-              ? Duration(seconds: resumeStartSec)
-              : null,
-        ),
-      );
-      _debugPlayer('open.player_open_returned', <String, Object?>{
-        'elapsedMs': openWatch.elapsedMilliseconds,
-      });
-      await applyNativePlaybackTune(_player);
-      _debugPlayer('open.native_tune_done', <String, Object?>{
-        'elapsedMs': openWatch.elapsedMilliseconds,
-      });
-      await _applyNativeSubtitleStyleFromPrefs();
-      _debugPlayer('open.subtitle_style_done', <String, Object?>{
-        'elapsedMs': openWatch.elapsedMilliseconds,
-      });
-      await _player.setVolume(_softwareVolume);
-      _debugPlayer('open.volume_done', <String, Object?>{
-        'volume': _softwareVolume.round(),
-        'elapsedMs': openWatch.elapsedMilliseconds,
-      });
       // Load subtitle asynchronously — do not block video ready state.
       unawaited(_applySelectedSubtitleTrack());
       if (!mounted) {
@@ -1301,7 +1256,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (durationSec > 0) {
       targetSec = targetSec.clamp(0, durationSec > 2 ? durationSec - 2 : durationSec);
     }
-    await _player.seek(Duration(seconds: targetSec));
+    await _controller?.seekTo(Duration(seconds: targetSec));
     _resumeApplied = true;
   }
 
@@ -1380,14 +1335,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _retryWithSoftwareDecoding() async {
     _debugPlayer('retry_sw.begin');
-    final PlatformPlayer? platform = _player.platform;
-    if (platform is NativePlayer) {
-      try {
-        await platform.setProperty('hwdec', 'no');
-      } catch (e) {
-        _debugPlayer('retry_sw.hwdec_error', <String, Object?>{'error': '$e'});
-      }
-    }
     final int resumePos = _position.inSeconds;
     await _openStream(resumeFrom: resumePos > 0 ? resumePos : null);
   }
@@ -1429,10 +1376,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       'wasPlaying': _playing,
     });
     if (_playing) {
-      await _player.pause();
+      await _controller?.pause();
       _debugPlayer('play_toggle.pause_sent');
     } else {
-      await _player.play();
+      await _controller?.play();
       _debugPlayer('play_toggle.play_sent');
     }
     _showControls();
@@ -1453,7 +1400,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 )
                 as num)
             .toInt();
-    await _player.seek(Duration(milliseconds: targetMs));
+    await _controller?.seekTo(Duration(milliseconds: targetMs));
     if (showControls) {
       _showControls();
     }
@@ -1471,7 +1418,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 )
                 as num)
             .toInt();
-    await _player.seek(Duration(milliseconds: targetMs));
+    await _controller?.seekTo(Duration(milliseconds: targetMs));
     _showControls();
   }
 
@@ -2074,13 +2021,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _activeExternalOfferId = null;
       _activeExternalSummary = null;
       _subtitlesEnabled = true;
-      await _player.setSubtitleTrack(
-        SubtitleTrack.uri(
-          'file://$resolvedPath',
-          title: single.name,
-          language: 'local',
-        ),
-      );
+      await _loadAndApplySubtitleFile('file://$resolvedPath');
       _setSubtitleState(enabled: true, message: 'Loaded ${single.name}');
     } catch (_) {
       if (mounted) {
@@ -2188,13 +2129,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _activeExternalSummary = null;
     _subtitlesEnabled = true;
     try {
-      await _player.setSubtitleTrack(
-        SubtitleTrack.uri(
-          'file://$path',
-          title: 'Pasted',
-          language: 'local',
-        ),
-      );
+      await _loadAndApplySubtitleFile('file://$path');
       _setSubtitleState(enabled: true, message: 'Pasted subtitle applied');
     } catch (_) {
       if (mounted) {
@@ -2285,13 +2220,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return;
       }
 
-      await _player.setSubtitleTrack(
-        SubtitleTrack.uri(
-          url,
-          title: offer.title,
-          language: offer.languageLabel,
-        ),
-      );
+      await _loadAndApplySubtitleFile(url);
       _setSubtitleState(enabled: true, message: offer.providerLabel);
       _showControls();
     } catch (_) {
@@ -2529,7 +2458,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return;
       }
       _softwareVolume = next;
-      await _player.setVolume(_softwareVolume);
+      await _controller?.setVolume((_softwareVolume / 100.0).clamp(0.0, 1.0));
       if (!mounted) {
         return;
       }
@@ -2686,7 +2615,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                         setState(() {
                           _softwareVolume = 100;
                         });
-                        await _player.setVolume(_softwareVolume);
+                        await _controller?.setVolume((_softwareVolume / 100.0).clamp(0.0, 1.0));
                         if (!context.mounted) {
                           return;
                         }
@@ -2718,7 +2647,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                               _softwareVolume = value;
                             });
                           });
-                          unawaited(_player.setVolume(_softwareVolume));
+                          unawaited(_controller?.setVolume((_softwareVolume / 100.0).clamp(0.0, 1.0)));
                         },
                       ),
                     );
@@ -2843,19 +2772,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 _PlayerBackdrop(mediaItem: widget.args.mediaItem),
                 Positioned.fill(
                   child: IgnorePointer(
-                    child: _playerReady
+                    child: (_playerReady && _controller != null && _controller!.value.isInitialized)
                         ? AnimatedOpacity(
                             opacity: _hasFirstVideoFrame ? 1.0 : 0.0,
                             duration: const Duration(milliseconds: 300),
-                            child: Video(
-                              controller: _videoController,
-                              controls: NoVideoControls,
-                              fit: BoxFit.contain,
-                              fill: AppColors.blackC50,
-                              subtitleViewConfiguration:
-                                  _buildSubtitleViewConfiguration(
-                                ref,
-                                displayVisible: false,
+                            child: SizedBox.expand(
+                              child: FittedBox(
+                                fit: BoxFit.contain,
+                                child: SizedBox(
+                                  width: _controller!.value.size.width > 0
+                                      ? _controller!.value.size.width
+                                      : 1920,
+                                  height: _controller!.value.size.height > 0
+                                      ? _controller!.value.size.height
+                                      : 1080,
+                                  child: VideoPlayer(_controller!),
+                                ),
                               ),
                             ),
                           )
@@ -2898,20 +2830,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       ? Column(
                           mainAxisSize: MainAxisSize.min,
                           children: <Widget>[
-                            Icon(
-                              Icons.play_circle_fill_rounded,
-                              color: AppColors.typeEmphasis.withValues(
-                                alpha: 0.18,
+                            const RepaintBoundary(
+                              child: SizedBox(
+                                width: 36,
+                                height: 36,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 3,
+                                  color: AppColors.purple,
+                                ),
                               ),
-                              size:
-                                  MediaQuery.sizeOf(context).shortestSide *
-                                  0.24,
                             ),
                             const SizedBox(height: AppSpacing.x3),
                             Text(
-                              _playerReady ? 'Streaming' : 'Loading stream...',
-                              style: Theme.of(context).textTheme.titleLarge
-                                  ?.copyWith(color: AppColors.typeEmphasis),
+                              'Loading stream...',
+                              style: Theme.of(context).textTheme.titleMedium
+                                  ?.copyWith(
+                                    color: AppColors.typeEmphasis,
+                                    fontWeight: FontWeight.w500,
+                                  ),
                             ),
                           ],
                         )
@@ -3010,16 +2946,50 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   onLock: _lockControls,
                   onNextEpisode: _playNextEpisode,
                 ),
-                if (_playerReady)
-                  Positioned.fill(
+                if (_subtitlesEnabled && _currentSubtitleText.isNotEmpty && _playerReady)
+                  AnimatedPositioned(
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeOut,
+                    left: AppSpacing.x4,
+                    right: AppSpacing.x4,
+                    bottom: (_controlsVisible && !_controlsLocked)
+                        ? AppSpacing.x20 + AppSpacing.x10
+                        : AppSpacing.x6,
                     child: IgnorePointer(
-                      child: SubtitleView(
-                        controller: _videoController,
-                        configuration: _buildSubtitleViewConfiguration(
-                          ref,
-                          displayVisible:
-                              !(_controlsVisible && !_controlsLocked),
-                          liftAboveControlChrome: false,
+                      child: RepaintBoundary(
+                        child: Container(
+                          alignment: Alignment.center,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: AppSpacing.x3,
+                              vertical: AppSpacing.x1,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(
+                                alpha: ref.watch(subtitleBgOpacityPrefProvider),
+                              ),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              _currentSubtitleText,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: _hexToColorPlayer(
+                                  ref.watch(subtitleColorPrefProvider),
+                                ),
+                                fontSize: ref.watch(subtitleSizePrefProvider).toDouble(),
+                                fontWeight: FontWeight.w600,
+                                height: 1.4,
+                                shadows: const <Shadow>[
+                                  Shadow(
+                                    color: Colors.black,
+                                    blurRadius: 3,
+                                    offset: Offset(0, 1),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -3242,27 +3212,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _applySelectedSubtitleTrack() async {
     if (!_subtitlesEnabled) {
-      await _player.setSubtitleTrack(SubtitleTrack.no());
+      _clearParsedSubtitles();
+      if (mounted) setState(() {});
       return;
     }
 
     if (_selectedCaption?.url?.isNotEmpty == true) {
-      final StreamCaption caption = _selectedCaption!;
-      final SubtitleTrack track = await _subtitleTrackForCaption(caption);
-      await _player.setSubtitleTrack(track);
-      return;
-    }
-
-    if (_player.state.tracks.subtitle.isNotEmpty) {
-      await _player.setSubtitleTrack(SubtitleTrack.auto());
+      final String? uri = await _subtitleTrackForCaption(_selectedCaption!);
+      if (uri != null && uri.isNotEmpty) {
+        await _loadAndApplySubtitleFile(uri);
+      }
       return;
     }
 
     if (_availableCaptions.isNotEmpty) {
       final StreamCaption caption = _availableCaptions.first;
       _selectedCaption = caption;
-      final SubtitleTrack track = await _subtitleTrackForCaption(caption);
-      await _player.setSubtitleTrack(track);
+      final String? uri = await _subtitleTrackForCaption(caption);
+      if (uri != null && uri.isNotEmpty) {
+        await _loadAndApplySubtitleFile(uri);
+      }
       return;
     }
 
@@ -3307,7 +3276,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _selectedCaption = null;
     _activeExternalOfferId = null;
     _activeExternalSummary = null;
-    await _player.setSubtitleTrack(SubtitleTrack.no());
+    _clearParsedSubtitles();
+    if (mounted) setState(() {});
     _setSubtitleState(enabled: false, message: 'Subtitles off');
     _showControls();
   }
@@ -3326,11 +3296,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       setState(() {});
     }
     _notifyPlayerSettingsSubtitleLabel();
-    final SubtitleTrack track = await _subtitleTrackForCaption(caption);
+    final String? trackUri = await _subtitleTrackForCaption(caption);
     if (!mounted) {
       return;
     }
-    await _player.setSubtitleTrack(track);
+    if (trackUri != null && trackUri.isNotEmpty) {
+      await _loadAndApplySubtitleFile(trackUri);
+    }
     _setSubtitleState(
       enabled: true,
       message: _displayLabelForSelectedCaption(caption),
