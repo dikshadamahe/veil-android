@@ -227,6 +227,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// top-right is the only affordance until the user taps it.
   bool _controlsLocked = false;
 
+  /// True once the video surface has decoded at least one frame.
+  /// The [Video] widget stays invisible until this flag so the surface
+  /// never flashes an empty / wrong-ratio frame that causes the visual
+  /// "jumping" reported by users.
+  bool _hasFirstVideoFrame = false;
+
+  /// Fires after [_player.open] if no video frame arrives within a
+  /// deadline.  Automatically retries with software decoding.
+  Timer? _videoStallTimer;
+
+  /// True after one software-decode retry so we don't loop forever.
+  bool _hwdecFallbackAttempted = false;
+
   void _debugPlayer(String event, [Map<String, Object?> data = const {}]) {
     final Map<String, Object?> fields = <String, Object?>{
       'ready': _playerReady,
@@ -366,6 +379,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (!mounted) {
       return;
     }
+    _videoStallTimer?.cancel();
     setState(() {
       _sourceSwitching = false;
       _pendingSourceId = null;
@@ -375,6 +389,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _hasPlaybackError = false;
       _playbackError = null;
       _buffering = true;
+      _hasFirstVideoFrame = false;
+      _hwdecFallbackAttempted = false;
       // Restore subtitle state from the preserved args so the user keeps
       // their active track across source switches.
       _activeExternalOfferId = widget.args.preservedExternalOfferId;
@@ -430,6 +446,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _progressTimer?.cancel();
     _subtitleToastTimer?.cancel();
     _gestureHintTimer?.cancel();
+    _videoStallTimer?.cancel();
     _playerSettingsLabelRev.dispose();
     unawaited(_restoreScreenBrightness());
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
@@ -1027,6 +1044,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           _controlsVisible = true;
         });
       }),
+      _player.stream.width.listen((int? value) {
+        if (!mounted) {
+          return;
+        }
+        if (value != null && value > 0 && !_hasFirstVideoFrame) {
+          _videoStallTimer?.cancel();
+          _debugPlayer('stream.firstVideoFrame', <String, Object?>{
+            'width': value,
+          });
+          setState(() {
+            _hasFirstVideoFrame = true;
+          });
+        }
+      }),
     ]);
   }
 
@@ -1068,6 +1099,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         ..._debugSourceFields(),
       });
 
+      _videoStallTimer?.cancel();
       if (mounted) {
         setState(() {
           _openingStream = true;
@@ -1077,6 +1109,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           _buffering = true;
           _controlsLocked = false;
           _controlsVisible = true;
+          _hasFirstVideoFrame = false;
         });
         _debugPlayer('open.surface_requested');
         await WidgetsBinding.instance.endOfFrame;
@@ -1091,6 +1124,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (platform is NativePlayer) {
         if (enableHw) {
           await platform.setProperty('hwdec', 'mediacodec');
+          await platform.setProperty('hwdec-codecs', 'h264');
         } else {
           await platform.setProperty('hwdec', 'no');
         }
@@ -1140,6 +1174,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         _buffering = false;
         _playbackError = null;
       });
+      // Start video-stall watchdog — if no video frame arrives within
+      // the deadline, retry with software decoding.
+      _videoStallTimer?.cancel();
+      _videoStallTimer = Timer(
+        const Duration(seconds: 8),
+        _handleVideoStall,
+      );
       _debugPlayer('open.ready', <String, Object?>{
         'elapsedMs': openWatch.elapsedMilliseconds,
       });
@@ -1203,12 +1244,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     final List<StreamCaption> captions = response.subtitles
         .map((OmssSubtitle s) {
           return StreamCaption(
-            url: s.url,
+            url: s.resolvedUrl,
             language: _languageCodeFromLabel(s.label),
             type: s.format,
             label: s.label,
             raw: <String, dynamic>{
-              'url': s.url,
+              'url': s.resolvedUrl,
               'label': s.label,
               'format': s.format,
             },
@@ -1224,9 +1265,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       stream: StreamPlayback(
         id: 'omss-${source.providerId}',
         type: source.type,
-        playlist: source.type == 'hls' ? source.url : null,
+        playlist: source.type == 'hls' ? source.resolvedUrl : null,
         proxiedPlaylist: null,
-        playbackUrl: source.url,
+        playbackUrl: source.resolvedUrl,
         playbackType: source.type,
         selectedQuality: source.quality,
         qualities: const <String, StreamQuality>{},
@@ -1306,6 +1347,49 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       setState(() {});
       _debugPlayer('recover.done');
     }
+  }
+
+  /// Watchdog callback: if no video frame has arrived after opening a
+  /// stream, retry with software decoding (hardware codecs sometimes
+  /// silently fail on HEVC / VP9 while audio continues).
+  void _handleVideoStall() {
+    if (!mounted || _hasFirstVideoFrame) {
+      return;
+    }
+    _debugPlayer('stall.check', <String, Object?>{
+      'playing': _playing,
+      'hwdecFallbackAttempted': _hwdecFallbackAttempted,
+    });
+    if (!_hwdecFallbackAttempted && _playing) {
+      // Audio is playing but video never decoded — likely a hardware
+      // codec failure.  Retry the stream with software decoding.
+      _debugPlayer('stall.hwdec_fallback');
+      _hwdecFallbackAttempted = true;
+      unawaited(_retryWithSoftwareDecoding());
+    } else {
+      // Either already retried or player isn't even playing yet.
+      // Show the surface as-is so controls remain functional.
+      _debugPlayer('stall.force_show');
+      if (mounted) {
+        setState(() {
+          _hasFirstVideoFrame = true;
+        });
+      }
+    }
+  }
+
+  Future<void> _retryWithSoftwareDecoding() async {
+    _debugPlayer('retry_sw.begin');
+    final PlatformPlayer? platform = _player.platform;
+    if (platform is NativePlayer) {
+      try {
+        await platform.setProperty('hwdec', 'no');
+      } catch (e) {
+        _debugPlayer('retry_sw.hwdec_error', <String, Object?>{'error': '$e'});
+      }
+    }
+    final int resumePos = _position.inSeconds;
+    await _openStream(resumeFrom: resumePos > 0 ? resumePos : null);
   }
 
   Future<void> _persistProgress({bool refresh = true}) async {
@@ -2759,21 +2843,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 _PlayerBackdrop(mediaItem: widget.args.mediaItem),
                 Positioned.fill(
                   child: IgnorePointer(
-                    child: (_playerReady || _openingStream)
-                        ? Video(
-                            controller: _videoController,
-                            controls: NoVideoControls,
-                            fit: BoxFit.contain,
-                            fill: AppColors.blackC50,
-                            // Flutter-side subtitle render. media_kit pushes
-                            // the active text track to `_player.stream.subtitle`
-                            // and SubtitleView paints it; the visible instance
-                            // is stacked *above* [PlayerControls] so it is not
-                            // covered by the control chrome.
-                            subtitleViewConfiguration:
-                                _buildSubtitleViewConfiguration(
-                              ref,
-                              displayVisible: false,
+                    child: _playerReady
+                        ? AnimatedOpacity(
+                            opacity: _hasFirstVideoFrame ? 1.0 : 0.0,
+                            duration: const Duration(milliseconds: 300),
+                            child: Video(
+                              controller: _videoController,
+                              controls: NoVideoControls,
+                              fit: BoxFit.contain,
+                              fill: AppColors.blackC50,
+                              subtitleViewConfiguration:
+                                  _buildSubtitleViewConfiguration(
+                                ref,
+                                displayVisible: false,
+                              ),
                             ),
                           )
                         : const SizedBox.shrink(),
