@@ -155,7 +155,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Timer? _gestureHintTimer;
   int _playerLogSeq = 0;
   int _lastLoggedPositionBucket = -1;
-  int _lastLoggedBufferBucket = -1;
+
 
   /// Drives [ValueListenableBuilder] around the open player settings sheet.
   /// Modal routes do not rebuild when this screen [setState]s, so the
@@ -2830,13 +2830,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       ? Column(
                           mainAxisSize: MainAxisSize.min,
                           children: <Widget>[
-                            const RepaintBoundary(
+                            RepaintBoundary(
                               child: SizedBox(
                                 width: 36,
                                 height: 36,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 3,
-                                  color: AppColors.purple,
+                                  color: AppColors.purpleC200,
                                 ),
                               ),
                             ),
