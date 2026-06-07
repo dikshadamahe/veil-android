@@ -22,6 +22,10 @@ class AppConfig {
 
   /// Returns [path] unchanged if it is already an absolute URL
   /// (has a scheme and host). Otherwise prefixes it with [oracleUrl].
+  ///
+  /// Also rewrites absolute resolver endpoints (starting with `/v1/`)
+  /// that point to the loopback or same host to use [oracleUrl]'s
+  /// scheme, host, and port, to handle port/proxy differences.
   static String resolveOmssUrl(String path) {
     final String trimmed = path.trim();
     if (trimmed.isEmpty) {
@@ -29,6 +33,20 @@ class AppConfig {
     }
     final Uri? uri = Uri.tryParse(trimmed);
     if (uri != null && uri.hasScheme && uri.host.isNotEmpty) {
+      final Uri baseUri = Uri.parse(oracleUrl);
+      final String host = uri.host.toLowerCase();
+      final String baseHost = baseUri.host.toLowerCase();
+      if (uri.path.startsWith('/v1/') &&
+          (host == baseHost ||
+           host == '127.0.0.1' ||
+           host == 'localhost' ||
+           host == '10.0.2.2')) {
+        return uri.replace(
+          scheme: baseUri.scheme,
+          host: baseUri.host,
+          port: baseUri.port,
+        ).toString();
+      }
       return trimmed;
     }
     if (trimmed.startsWith('/')) {

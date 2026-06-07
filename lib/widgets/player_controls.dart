@@ -292,7 +292,7 @@ class PlayerInfoPill extends StatelessWidget {
   }
 }
 
-class _SeekBar extends StatelessWidget {
+class _SeekBar extends StatefulWidget {
   const _SeekBar({
     required this.position,
     required this.duration,
@@ -306,15 +306,39 @@ class _SeekBar extends StatelessWidget {
   final Future<void> Function(double fraction) onSeek;
 
   @override
+  State<_SeekBar> createState() => _SeekBarState();
+}
+
+class _SeekBarState extends State<_SeekBar> {
+  /// True while the user is actively dragging the seek thumb.
+  /// During a drag the thumb tracks [_dragFraction] instead of the
+  /// stream position, eliminating the jitter from ~4 Hz rebuilds.
+  bool _isDragging = false;
+  double _dragFraction = 0;
+
+  double get _playedFraction {
+    final double totalMs = widget.duration.inMilliseconds.toDouble();
+    if (totalMs <= 0) {
+      return 0;
+    }
+    return (widget.position.inMilliseconds / totalMs).clamp(0, 1).toDouble();
+  }
+
+  double get _bufferedFraction {
+    final double totalMs = widget.duration.inMilliseconds.toDouble();
+    if (totalMs <= 0) {
+      return 0;
+    }
+    return (widget.buffered.inMilliseconds / totalMs).clamp(0, 1).toDouble();
+  }
+
+  /// The fraction used for the played bar and thumb position.
+  double get _displayFraction => _isDragging ? _dragFraction : _playedFraction;
+
+  @override
   Widget build(BuildContext context) {
     final _PlayerControlMetrics metrics = _PlayerControlMetrics.of(context);
-    final double totalMs = duration.inMilliseconds.toDouble();
-    final double bufferedFraction = totalMs <= 0
-        ? 0
-        : (buffered.inMilliseconds / totalMs).clamp(0, 1).toDouble();
-    final double playedFraction = totalMs <= 0
-        ? 0
-        : (position.inMilliseconds / totalMs).clamp(0, 1).toDouble();
+    final double displayFraction = _displayFraction;
 
     return RepaintBoundary(
       child: LayoutBuilder(
@@ -326,14 +350,36 @@ class _SeekBar extends StatelessWidget {
                   (details.localPosition.dx / constraints.maxWidth)
                       .clamp(0, 1)
                       .toDouble();
-              onSeek(fraction);
+              widget.onSeek(fraction);
+            },
+            onHorizontalDragStart: (DragStartDetails details) {
+              setState(() {
+                _isDragging = true;
+                _dragFraction =
+                    (details.localPosition.dx / constraints.maxWidth)
+                        .clamp(0, 1)
+                        .toDouble();
+              });
             },
             onHorizontalDragUpdate: (DragUpdateDetails details) {
-              final double fraction =
-                  (details.localPosition.dx / constraints.maxWidth)
-                      .clamp(0, 1)
-                      .toDouble();
-              onSeek(fraction);
+              setState(() {
+                _dragFraction =
+                    (details.localPosition.dx / constraints.maxWidth)
+                        .clamp(0, 1)
+                        .toDouble();
+              });
+            },
+            onHorizontalDragEnd: (DragEndDetails details) {
+              final double finalFraction = _dragFraction;
+              setState(() {
+                _isDragging = false;
+              });
+              widget.onSeek(finalFraction);
+            },
+            onHorizontalDragCancel: () {
+              setState(() {
+                _isDragging = false;
+              });
             },
             child: SizedBox(
               height: metrics.seekBarHeight,
@@ -347,40 +393,53 @@ class _SeekBar extends StatelessWidget {
                         color: AppColors.progressBackground.withValues(
                           alpha: 0.35,
                         ),
-                        borderRadius: BorderRadius.circular(metrics.trackRadius),
+                        borderRadius:
+                            BorderRadius.circular(metrics.trackRadius),
                       ),
                     ),
                     FractionallySizedBox(
-                      widthFactor: bufferedFraction,
+                      widthFactor: _bufferedFraction,
                       child: Container(
                         height: metrics.seekTrackHeight,
                         decoration: BoxDecoration(
                           color: AppColors.semanticSilverC400,
-                          borderRadius: BorderRadius.circular(metrics.trackRadius),
+                          borderRadius:
+                              BorderRadius.circular(metrics.trackRadius),
                         ),
                       ),
                     ),
                     FractionallySizedBox(
-                      widthFactor: playedFraction,
+                      widthFactor: displayFraction,
                       child: Container(
                         height: metrics.seekTrackHeight,
                         decoration: BoxDecoration(
                           color: AppColors.progressFilled,
-                          borderRadius: BorderRadius.circular(metrics.trackRadius),
+                          borderRadius:
+                              BorderRadius.circular(metrics.trackRadius),
                         ),
                       ),
                     ),
                     Positioned(
-                      left:
-                          (constraints.maxWidth * playedFraction) -
+                      left: (constraints.maxWidth * displayFraction) -
                           metrics.thumbRadius,
                       top: -metrics.thumbRadius,
                       child: Container(
                         width: metrics.thumbSize,
                         height: metrics.thumbSize,
-                        decoration: const BoxDecoration(
+                        decoration: BoxDecoration(
                           color: AppColors.progressFilled,
                           shape: BoxShape.circle,
+                          boxShadow: _isDragging
+                              ? <BoxShadow>[
+                                  BoxShadow(
+                                    color:
+                                        AppColors.progressFilled.withValues(
+                                      alpha: 0.4,
+                                    ),
+                                    blurRadius: 8,
+                                  ),
+                                ]
+                              : null,
                         ),
                       ),
                     ),
