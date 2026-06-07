@@ -1,56 +1,20 @@
-import 'package:flutter/foundation.dart';
-import 'package:media_kit/media_kit.dart';
-
-
-/// Optional libmpv tuning for Android native [Player] (playback parity / headroom).
+/// No-op stubs: video_player (ExoPlayer) handles playback tuning natively.
 ///
-/// Safe no-ops on web or non-native backends.
-Future<void> applyNativePlaybackTune(Player player) async {
-  if (kIsWeb) {
-    return;
-  }
-  final PlatformPlayer? platform = player.platform;
-  if (platform is! NativePlayer) {
-    return;
-  }
-  try {
-    await platform.setProperty('volume-max', '150');
-    await platform.setProperty('demuxer-readahead-secs', '20');
-    // hwdec is now set exclusively by _openStream in player_screen.dart
-    // before _player.open() to avoid the race condition of setting it twice.
-  } catch (error, stackTrace) {
-    debugPrint('applyNativePlaybackTune: $error\n$stackTrace');
-  }
+/// These functions existed for media_kit/libmpv property injection. Kept as
+/// no-ops so any stale call-sites compile without error until fully removed.
+
+/// Previously configured libmpv demuxer/volume-max properties.
+Future<void> applyNativePlaybackTune(dynamic player) async {
+  // No-op: video_player (ExoPlayer) handles tuning natively.
 }
 
-/// Push subtitle style to libmpv so the on-screen render matches the user's
-/// Customize choices. [size] is in libmpv `sub-font-size` units, [colorHex]
-/// is `#AARRGGBB`, and [bgOpacity] is 0..1 mapped onto the alpha channel of
-/// `sub-back-color` (RGB always black for legibility).
+/// Previously pushed subtitle style to libmpv sub-* properties.
 Future<void> applyNativeSubtitleStyle(
-  Player player, {
+  dynamic player, {
   required int size,
   required String colorHex,
   required double bgOpacity,
 }) async {
-  if (kIsWeb) {
-    return;
-  }
-  final PlatformPlayer? platform = player.platform;
-  if (platform is! NativePlayer) {
-    return;
-  }
-  try {
-    final int alpha = (bgOpacity.clamp(0.0, 1.0) * 255).round();
-    final String alphaHex =
-        alpha.toRadixString(16).padLeft(2, '0').toUpperCase();
-    final String bgColor = '#${alphaHex}000000';
-    await platform.setProperty('sub-font-size', '$size');
-    await platform.setProperty('sub-color', colorHex);
-    await platform.setProperty('sub-back-color', bgColor);
-    await platform.setProperty('sub-border-color', '#FF000000');
-    await platform.setProperty('sub-border-size', '2');
-  } catch (error, stackTrace) {
-    debugPrint('applyNativeSubtitleStyle: $error\n$stackTrace');
-  }
+  // No-op: video_player does not expose native subtitle style properties.
+  // TODO: implement subtitle styling with video_player if needed.
 }
