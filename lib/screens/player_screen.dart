@@ -1089,8 +1089,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
 
       // Dispose previous controller if any (source switch / quality change).
-      _controller?.removeListener(_onControllerUpdate);
-      _controller?.dispose();
+      final VideoPlayerController? old = _controller;
+      if (old != null) {
+        old.removeListener(_onControllerUpdate);
+        await old.dispose();
+      }
       _controller = null;
 
       _debugPlayer('open.creating_controller', <String, Object?>{
@@ -1100,12 +1103,35 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         Uri.parse(url),
         httpHeaders: headers,
       );
-      _controller!.addListener(_onControllerUpdate);
+
       await _controller!.initialize();
+      if (!mounted) {
+        return;
+      }
+      _controller!.addListener(_onControllerUpdate);
+
       _debugPlayer('open.controller_initialized', <String, Object?>{
         'elapsedMs': openWatch.elapsedMilliseconds,
       });
-      await _controller!.setVolume((_softwareVolume / 100.0).clamp(0.0, 1.0));
+
+      await _controller!.setVolume(
+        (_softwareVolume / 100.0).clamp(0.0, 1.0),
+      );
+
+      // Mark player ready before starting playback so any UI dependent
+      // on [_playerReady] (controls, seeking duration flows) is enabled
+      // before _controller.play() triggers events.
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _openingStream = false;
+        _playerReady = true;
+        _hasPlaybackError = false;
+        _buffering = false;
+        _playbackError = null;
+      });
+
       await _controller!.play();
       _debugPlayer('open.play_called', <String, Object?>{
         'elapsedMs': openWatch.elapsedMilliseconds,
@@ -1122,13 +1148,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (!mounted) {
         return;
       }
-      setState(() {
-        _openingStream = false;
-        _playerReady = true;
-        _hasPlaybackError = false;
-        _buffering = false;
-        _playbackError = null;
-      });
       // Start video-stall watchdog — if no video frame arrives within
       // the deadline, retry with software decoding.
       _videoStallTimer?.cancel();
@@ -1385,11 +1404,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _showControls();
   }
 
-  void _exitPlayer() {
+  Future<void> _exitPlayer() async {
     _debugPlayer('exit.begin');
+
+    final VideoPlayerController? c = _controller;
+    if (c != null) {
+      try {
+        c.removeListener(_onControllerUpdate);
+        await c.pause();
+      } catch (_) {
+        // Ignore: navigation should still work even if pause fails.
+      }
+    }
+
+    await _persistProgress();
+
+    if (!mounted) {
+      return;
+    }
     final NavigatorState navigator = Navigator.of(context);
-    unawaited(_persistProgress());
-    unawaited(navigator.maybePop());
+    await navigator.maybePop();
   }
 
   Future<void> _seekRelative(int seconds, {bool showControls = true}) async {

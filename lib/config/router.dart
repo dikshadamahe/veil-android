@@ -142,14 +142,19 @@ final GoRouter appRouter = GoRouter(
       path: '/player',
       builder: (BuildContext context, GoRouterState state) {
         final PlayerScreenArgs args = state.extra! as PlayerScreenArgs;
-        // One [PlayerScreen] *session* per playing unit (movie, or one TV episode).
-        // Source switches use the [same] key: [State] is kept, new [PlayerScreenArgs]
-        // are delivered from GoRouter, and [PlayerScreen] reloads the stream in
-        // [didUpdateWidget] when [streamResult] / [replaceEpoch] change. Keys that
-        // included the stream URL or forced remount could drop state and skip
-        // the second [_openStream].
+
+        // Keep one player *session* per playing unit, but also include the
+        // replace epoch so a source switch can force a clean transition
+        // (prevents overlapping "double player" visuals).
+        final String? r = state.uri.queryParameters['r'];
+        final int? replaceEpoch = args.replaceEpoch ?? (r == null ? null : int.tryParse(r));
+        final String sessionId = _playerScreenSessionId(args);
+        final String keyMaterial = replaceEpoch == null
+            ? sessionId
+            : '$sessionId-r$replaceEpoch';
+
         return PlayerScreen(
-          key: ValueKey<String>(_playerScreenSessionId(args)),
+          key: ValueKey<String>(keyMaterial),
           args: args,
         );
       },
