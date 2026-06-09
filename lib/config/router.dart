@@ -6,7 +6,6 @@ import 'package:pstream_android/screens/history_screen.dart';
 import 'package:pstream_android/screens/home_screen.dart';
 import 'package:pstream_android/screens/my_list_screen.dart';
 import 'package:pstream_android/screens/player_screen.dart';
-import 'package:pstream_android/screens/scraping_screen.dart';
 import 'package:pstream_android/screens/search_screen.dart';
 import 'package:pstream_android/screens/settings_screen.dart';
 import 'package:pstream_android/screens/splash_screen.dart';
@@ -121,21 +120,6 @@ final GoRouter appRouter = GoRouter(
       builder: (BuildContext context, GoRouterState state) {
         final MediaItem mediaItem = state.extra! as MediaItem;
         return DetailScreen(mediaItem: mediaItem);
-      },
-    ),
-    GoRoute(
-      path: '/scraping',
-      builder: (BuildContext context, GoRouterState state) {
-        final ScrapingScreenArgs args = state.extra! as ScrapingScreenArgs;
-        return ScrapingScreen(
-          mediaItem: args.mediaItem,
-          season: args.season,
-          episode: args.episode,
-          seasonTmdbId: args.seasonTmdbId,
-          episodeTmdbId: args.episodeTmdbId,
-          seasonTitle: args.seasonTitle,
-          resumeFrom: args.resumeFrom,
-        );
       },
     ),
     GoRoute(

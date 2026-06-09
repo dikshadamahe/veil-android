@@ -8,7 +8,7 @@ import 'package:pstream_android/config/breakpoints.dart';
 import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/tmdb_provider.dart';
-import 'package:pstream_android/screens/scraping_screen.dart';
+import 'package:pstream_android/screens/player_screen.dart';
 import 'package:pstream_android/screens/search_screen.dart';
 import 'package:pstream_android/widgets/episode_list_sheet.dart';
 import 'package:shimmer/shimmer.dart';
@@ -84,15 +84,17 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     }
 
     context.push(
-      '/scraping',
-      extra: ScrapingScreenArgs(
+      '/player',
+      extra: PlayerScreenArgs(
         mediaItem: media,
+        omssResponse: null,
         season: selectedSeason,
         episode: selectedEpisode,
         seasonTmdbId: scrapeSeasonTmdbId,
         episodeTmdbId: scrapeEpisodeTmdbId,
         seasonTitle: scrapeSeasonTitle,
         resumeFrom: resumeFrom,
+        replaceEpoch: DateTime.now().microsecondsSinceEpoch,
       ),
     );
 

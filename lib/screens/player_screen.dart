@@ -21,7 +21,6 @@ import 'package:pstream_android/models/season.dart';
 import 'package:pstream_android/models/stream_result.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
-import 'package:pstream_android/screens/scraping_screen.dart';
 import 'package:pstream_android/services/external_subtitle_service.dart';
 import 'package:pstream_android/services/stream_service.dart';
 import 'package:pstream_android/storage/local_storage.dart';
@@ -30,6 +29,11 @@ import 'package:pstream_android/widgets/player_controls.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 
 enum _PlayerEdgeSwipe { none, brightness, volume }
+
+/// Sentinel for "resolver responded but returned zero playable sources".
+class _NoSourcesError implements Exception {
+  const _NoSourcesError();
+}
 
 /// Per-source probe result for the "check streams" UI.
 /// One row in the subtitles sheet: embedded tracks + online offers for a language.
@@ -78,7 +82,11 @@ class PlayerScreenArgs {
   /// The full OMSS v1.0 response for this title. The player uses it
   /// to populate the source picker and to switch sources without
   /// re-fetching unless [refresh] is invoked from the sheet.
-  final OmssResponse omssResponse;
+  ///
+  /// When `null`, the player fetches sources itself on open (showing its
+  /// own loading/error states) — there is no separate "finding sources"
+  /// gate screen anymore.
+  final OmssResponse? omssResponse;
 
   /// Index of the source the caller wants to start with. Defaults to
   /// "first hls at 1080p, else first hls, else first source" when null.
@@ -104,8 +112,13 @@ class PlayerScreenArgs {
   /// The [OmssSource] the player should open with. Computed once at
   /// construction; the source sheet may swap to a different source by
   /// constructing a fresh [PlayerScreenArgs] with a new index.
-  OmssSource get initialSource {
-    final List<OmssSource> sources = omssResponse.sources;
+  OmssSource get initialSource => initialSourceFrom(omssResponse!);
+
+  /// Picks the source to open for an arbitrary [response] using the caller's
+  /// requested index (when valid) or the default heuristic. Used both for the
+  /// eagerly-supplied response and the one the player fetches itself.
+  OmssSource initialSourceFrom(OmssResponse response) {
+    final List<OmssSource> sources = response.sources;
     if (sources.isEmpty) {
       throw StateError('OmssResponse has no sources.');
     }
@@ -307,18 +320,41 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     };
   }
 
+  /// True while the player is fetching its own OMSS sources (only when the
+  /// caller pushed `/player` without a pre-fetched response).
+  bool _sourcesLoading = false;
+
+  /// Set when the self-fetch failed so [build] can show an error card with a
+  /// retry action instead of the player.
+  Object? _sourcesError;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _storageController = ref.read(storageControllerProvider);
     _streamService = ref.read(streamServiceProvider);
-    _activeSource = widget.args.initialSource;
-    _omssResponse = widget.args.omssResponse;
-    _activeStreamResult = _synthesizeStreamResult(
-      _omssResponse,
-      _activeSource,
-    );
+    _applyPlayerChrome();
+    _armControlsHideTimer();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_primeScreenBrightness());
+    });
+
+    final OmssResponse? supplied = widget.args.omssResponse;
+    if (supplied != null && !supplied.isEmpty) {
+      _initWithResponse(supplied, widget.args.initialSourceFrom(supplied));
+    } else {
+      _sourcesLoading = true;
+      unawaited(_fetchSourcesThenInit());
+    }
+  }
+
+  /// Wires up playback for a resolved [response]/[initial] source. Shared by
+  /// the eager path (caller supplied the response) and the self-fetch path.
+  void _initWithResponse(OmssResponse response, OmssSource initial) {
+    _omssResponse = response;
+    _activeSource = initial;
+    _activeStreamResult = _synthesizeStreamResult(_omssResponse, _activeSource);
 
     _debugPlayer('init', <String, Object?>{
       'media': widget.args.mediaItem.hiveKey(),
@@ -326,17 +362,59 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     });
 
     _applyUserPlaybackPrefs();
-    _applyPlayerChrome();
     _bindPlayerStreams();
     _openStream();
     _progressTimer = Timer.periodic(
       const Duration(seconds: 10),
       (_) => _persistProgress(),
     );
-    _armControlsHideTimer();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      unawaited(_primeScreenBrightness());
+  }
+
+  /// Fetches sources for the title and starts playback, replacing the old
+  /// standalone "finding sources" screen. Shows loading/error inline.
+  Future<void> _fetchSourcesThenInit() async {
+    try {
+      final OmssResponse response = await _streamService.fetchSources(
+        widget.args.mediaItem,
+        season: widget.args.season,
+        episode: widget.args.episode,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (response.isEmpty) {
+        setState(() {
+          _sourcesLoading = false;
+          _sourcesError = const _NoSourcesError();
+        });
+        return;
+      }
+      setState(() {
+        _sourcesLoading = false;
+      });
+      _initWithResponse(
+        response,
+        widget.args.initialSourceFrom(response),
+      );
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _sourcesLoading = false;
+          _sourcesError = error;
+        });
+      }
+    }
+  }
+
+  void _retrySourceFetch() {
+    setState(() {
+      _sourcesError = null;
+      _sourcesLoading = true;
     });
+    unawaited(_fetchSourcesThenInit());
   }
 
   @override
@@ -349,11 +427,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   bool _playbackArgsDiffer(PlayerScreenArgs a, PlayerScreenArgs b) {
+    final OmssResponse? bResponse = b.omssResponse;
+    if (bResponse == null || bResponse.isEmpty) {
+      // Deferred-fetch args never trigger an in-place reload; the fresh
+      // player instance fetches its own sources on init.
+      return false;
+    }
     if (a.replaceEpoch != b.replaceEpoch) {
       return true;
     }
     return _activeStreamResult.stream.playbackUrl !=
-        _synthesizeStreamResult(b.omssResponse, b.initialSource)
+        _synthesizeStreamResult(bResponse, b.initialSourceFrom(bResponse))
             .stream
             .playbackUrl;
   }
@@ -388,9 +472,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _activeExternalOfferId = widget.args.preservedExternalOfferId;
       _activeExternalSummary = widget.args.preservedExternalSummary;
       // Resync the synthesized stream result from the new args.
-      _activeSource = widget.args.initialSource;
+      _omssResponse = widget.args.omssResponse!;
+      _activeSource = widget.args.initialSourceFrom(_omssResponse);
       _activeStreamResult = _synthesizeStreamResult(
-        widget.args.omssResponse,
+        _omssResponse,
         _activeSource,
       );
     });
@@ -1223,11 +1308,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       'thai': 'th', 'vietnamese': 'vi', 'indonesian': 'id',
       'malay': 'ms', 'ukrainian': 'uk', 'bulgarian': 'bg',
     };
+    // Strip trailing digits ("Arabic2" → "arabic", "ar2" → "ar").
+    final String stripped = base.replaceAll(RegExp(r'\d+$'), '').trim();
     // Also handle 2/3-letter codes passed directly.
-    if (base.length == 2 || base.length == 3) {
-      return base;
+    if (stripped.length == 2 || stripped.length == 3) {
+      return table[stripped] ?? stripped;
     }
-    return table[base];
+    return table[stripped];
   }
 
   /// Builds the [StreamResult] the rest of the player reads from, given
@@ -1682,30 +1769,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         return _PlayerSheetScaffold(
           child: _PlayerOptionSheet(
             title: 'Sources',
-            trailingText: 'Find next source',
             onBack: () => Navigator.of(context).pop(),
-            onTrailingTap: () async {
-              final NavigatorState modalNavigator = Navigator.of(context);
-              final NavigatorState screenNavigator = Navigator.of(this.context);
-              await _persistProgress();
-              if (!mounted) {
-                return;
-              }
-              modalNavigator.pop();
-              await screenNavigator.pushReplacement(
-                MaterialPageRoute<void>(
-                  builder: (_) => ScrapingScreen(
-                    mediaItem: widget.args.mediaItem,
-                    season: widget.args.season,
-                    episode: widget.args.episode,
-                    seasonTmdbId: widget.args.seasonTmdbId,
-                    episodeTmdbId: widget.args.episodeTmdbId,
-                    seasonTitle: widget.args.seasonTitle,
-                    resumeFrom: _position.inSeconds,
-                  ),
-                ),
-              );
-            },
             child: _SourcesCatalogSheet(
               allSources: _omssResponse.sources,
               currentProviderKey: _omssProviderKey(_activeSource),
@@ -1752,10 +1816,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   Future<void> _openQualitySheet() async {
     _showControls();
-    // Qualities come from the OMSS sibling sources of the active provider
+    // Qualities are the distinct quality labels across every OMSS source
     // (cinepro returns one source per (provider, quality) pair).
-    final List<OmssSource> variants = _qualityVariantsForActiveProvider;
-    final bool hasQualities = variants.isNotEmpty;
+    final List<String> labels = _availableQualityLabels;
+    final bool hasQualities = labels.isNotEmpty;
 
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
@@ -1771,20 +1835,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     ? ListView.builder(
                         primary: false,
                         shrinkWrap: true,
-                        itemCount: variants.length,
+                        itemCount: labels.length,
                         itemBuilder: (BuildContext context, int index) {
-                          final OmssSource variant = variants[index];
+                          final String quality = labels[index];
                           final bool isSelected =
-                              variant.resolvedUrl == _activeSource.resolvedUrl;
+                              quality == _activeSource.quality;
 
                           return _PlayerOptionRow(
-                            title: _omssQualityLabel(variant),
-                            subtitle: variant.type.toUpperCase(),
+                            title: quality,
                             selected: isSelected,
                             onTap: () {
                               if (!isSelected) {
                                 Navigator.of(context).pop();
-                                unawaited(_switchToQualityVariant(variant));
+                                unawaited(_switchToQuality(quality));
                               }
                             },
                           );
@@ -1796,7 +1859,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                           vertical: AppSpacing.x6,
                         ),
                         child: Text(
-                          'This source exposes a single stream quality. '
+                          'This title exposes a single stream quality. '
                           'The player is using the source default.',
                           textAlign: TextAlign.left,
                           style: TextStyle(color: AppColors.typeSecondary),
@@ -1810,7 +1873,38 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
+  /// Distinct, non-empty quality labels across every OMSS source, in the
+  /// order they first appear in the response.
+  List<String> get _availableQualityLabels {
+    final Set<String> seen = <String>{};
+    return _omssResponse.sources
+        .where((OmssSource s) => s.quality != null && s.quality!.isNotEmpty)
+        .map((OmssSource s) => s.quality!)
+        .where(seen.add)
+        .toList();
+  }
+
+  /// Switches to the first source carrying [quality]. No-op when the active
+  /// source already matches.
+  Future<void> _switchToQuality(String quality) async {
+    if (_activeSource.quality == quality) {
+      return;
+    }
+    OmssSource? match;
+    for (final OmssSource s in _omssResponse.sources) {
+      if (s.quality == quality) {
+        match = s;
+        break;
+      }
+    }
+    if (match == null) {
+      return;
+    }
+    await _switchSource(match);
+  }
+
   /// All quality variants for the active provider, highest quality first.
+  /// Used by the quality-cap auto-selection ([_bestVariantAtOrBelow]).
   List<OmssSource> get _qualityVariantsForActiveProvider {
     final String key = _omssProviderKey(_activeSource);
     final List<OmssSource> out = _omssResponse.sources
@@ -1819,38 +1913,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       ..sort((OmssSource a, OmssSource b) =>
           _omssQualityRank(b.quality).compareTo(_omssQualityRank(a.quality)));
     return out;
-  }
-
-  /// Switches to a sibling source (same provider, different quality) in place,
-  /// preserving the playback position. Unlike a provider switch, this does not
-  /// rebuild the whole player route.
-  Future<void> _switchToQualityVariant(OmssSource variant) async {
-    if (!mounted || variant.resolvedUrl == _activeSource.resolvedUrl) {
-      return;
-    }
-    final int resumeFrom = _position.inSeconds;
-    await _persistProgress();
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _activeSource = variant;
-      _activeStreamResult = _synthesizeStreamResult(_omssResponse, variant);
-      _selectedQualityKey = null;
-      _selectedQualityUrl = null;
-      _playerReady = false;
-      _buffering = true;
-      _hasFirstVideoFrame = false;
-      _hwdecFallbackAttempted = false;
-    });
-    _playerSettingsLabelRev.value++;
-    await _openStream(resumeFrom: resumeFrom > 0 ? resumeFrom : null);
-    if (mounted) {
-      _setSubtitleState(
-        enabled: _subtitlesEnabled,
-        message: 'Quality: ${_omssQualityLabel(variant)}',
-      );
-    }
   }
 
   Future<OnlineSubtitleSearchResult> _loadOnlineSubtitleSearch() async {
@@ -2888,24 +2950,147 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
 
-    final NavigatorState navigator = Navigator.of(context);
     await _persistProgress();
     if (!mounted) {
       return;
     }
-    await navigator.pushReplacement(
-      MaterialPageRoute<void>(
-        builder: (_) => ScrapingScreen(
-          mediaItem: widget.args.mediaItem,
-          season: nextEpisode.season,
-          episode: nextEpisode.episode,
-        ),
+    context.pushReplacement(
+      '/player',
+      extra: PlayerScreenArgs(
+        mediaItem: widget.args.mediaItem,
+        omssResponse: null,
+        season: nextEpisode.season,
+        episode: nextEpisode.episode,
+        replaceEpoch: DateTime.now().microsecondsSinceEpoch,
       ),
     );
   }
 
+  /// Full-screen loading/error UI shown while the player fetches its own
+  /// sources (replaces the old standalone "finding sources" screen).
+  Widget _buildSourceGate(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final Widget content = _sourcesError != null
+        ? Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.x8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                const Icon(
+                  Icons.error_outline_rounded,
+                  color: AppColors.videoContextError,
+                  size: AppSpacing.x16,
+                ),
+                const SizedBox(height: AppSpacing.x4),
+                Text(
+                  "Couldn't find sources",
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    color: AppColors.typeEmphasis,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.x3),
+                Text(
+                  _sourceFetchErrorMessage(_sourcesError),
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: AppColors.typeSecondary,
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.x6),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    OutlinedButton(
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      child: const Text('Back'),
+                    ),
+                    const SizedBox(width: AppSpacing.x3),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: AppColors.buttonsPurple,
+                        foregroundColor: AppColors.typeEmphasis,
+                      ),
+                      onPressed: _retrySourceFetch,
+                      child: const Text('Try again'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          )
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              RepaintBoundary(
+                child: SizedBox(
+                  width: 36,
+                  height: 36,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 3,
+                    color: AppColors.purpleC200,
+                  ),
+                ),
+              ),
+              const SizedBox(height: AppSpacing.x3),
+              Text(
+                'Loading stream...',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: AppColors.typeEmphasis,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          );
+
+    return Scaffold(
+      backgroundColor: AppColors.blackC50,
+      body: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          _PlayerBackdrop(mediaItem: widget.args.mediaItem),
+          Positioned(
+            top: AppSpacing.x2,
+            left: AppSpacing.x2,
+            child: SafeArea(
+              child: IconButton(
+                onPressed: () => Navigator.of(context).maybePop(),
+                icon: const Icon(Icons.arrow_back_rounded),
+                color: AppColors.typeEmphasis,
+              ),
+            ),
+          ),
+          Center(child: content),
+        ],
+      ),
+    );
+  }
+
+  String _sourceFetchErrorMessage(Object? error) {
+    if (error is OmssException) {
+      return 'The resolver returned HTTP ${error.statusCode}. '
+          'Check the server and your network.';
+    }
+    if (error is TimeoutException) {
+      return 'The resolver took too long to respond. Try again.';
+    }
+    if (error is SocketException) {
+      return "Couldn't reach the resolver. Check your connection.";
+    }
+    if (error is _NoSourcesError) {
+      return 'No playable sources for this title right now. '
+          'It may be too new, region-locked, or temporarily unavailable.';
+    }
+    return 'Something went wrong while finding sources.';
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_sourcesLoading || _sourcesError != null) {
+      return _buildSourceGate(context);
+    }
+
     final String title;
     if (widget.args.mediaItem.isShow &&
         widget.args.season != null &&
@@ -2939,7 +3124,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           child: Stack(
             fit: StackFit.expand,
             children: <Widget>[
-              _PlayerBackdrop(mediaItem: widget.args.mediaItem),
+              if (!_playerReady)
+                _PlayerBackdrop(mediaItem: widget.args.mediaItem),
               Positioned.fill(
                   child: IgnorePointer(
                     child: (_playerReady && _controller != null && _controller!.value.isInitialized)
@@ -3214,9 +3400,49 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return grouped;
   }
 
+  /// Buckets a raw language string (code or full name) to a stable key so
+  /// "ar", "Arabic" and "Arabic2" all collapse into one row. Falls back to
+  /// the lowercased, digit-stripped form when the code is unknown.
   static String _subtitleLanguageBucket(String raw) {
-    final String t = raw.trim().toLowerCase();
-    return t.isEmpty ? 'unknown' : t;
+    final String t = raw.trim();
+    if (t.isEmpty) {
+      return 'unknown';
+    }
+    final String? code = _languageCodeFromLabel(t);
+    if (code != null && code.isNotEmpty) {
+      return code;
+    }
+    return t.toLowerCase().replaceAll(RegExp(r'\d+$'), '').trim();
+  }
+
+  static const Map<String, String> _codeToLanguageName = <String, String>{
+    'en': 'English', 'es': 'Spanish', 'fr': 'French',
+    'de': 'German', 'it': 'Italian', 'pt': 'Portuguese',
+    'nl': 'Dutch', 'ru': 'Russian', 'ja': 'Japanese',
+    'ko': 'Korean', 'zh': 'Chinese', 'ar': 'Arabic',
+    'hi': 'Hindi', 'tr': 'Turkish', 'pl': 'Polish',
+    'sv': 'Swedish', 'no': 'Norwegian', 'da': 'Danish',
+    'fi': 'Finnish', 'el': 'Greek', 'he': 'Hebrew',
+    'ro': 'Romanian', 'cs': 'Czech', 'hu': 'Hungarian',
+    'th': 'Thai', 'vi': 'Vietnamese', 'id': 'Indonesian',
+    'ms': 'Malay', 'uk': 'Ukrainian', 'bg': 'Bulgarian',
+  };
+
+  /// Full word form for a raw language string when known, else the
+  /// digit-stripped, capitalized raw value.
+  static String _displayLanguageName(String raw) {
+    final String? code = _languageCodeFromLabel(raw);
+    if (code != null) {
+      final String? full = _codeToLanguageName[code];
+      if (full != null) {
+        return full;
+      }
+    }
+    final String base = raw.trim().replaceAll(RegExp(r'\d+$'), '').trim();
+    if (base.isEmpty) {
+      return raw.trim();
+    }
+    return base[0].toUpperCase() + base.substring(1);
   }
 
   /// Wyzie vs OpenSubtitles chip for merged subtitle rows.
@@ -3240,10 +3466,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     for (final MapEntry<String, List<StreamCaption>> e
         in _groupedCaptionsByLanguage.entries) {
       final String b = _subtitleLanguageBucket(e.key);
+      final _MergedSubtitleLang? prev = map[b];
       map[b] = _MergedSubtitleLang(
-        displayName: e.key,
-        captions: List<StreamCaption>.from(e.value),
-        offers: <ExternalSubtitleOffer>[],
+        displayName: _displayLanguageName(e.key),
+        captions: <StreamCaption>[
+          ...?prev?.captions,
+          ...e.value,
+        ],
+        offers: <ExternalSubtitleOffer>[...?prev?.offers],
       );
     }
 
@@ -3260,7 +3490,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         );
       } else {
         map[b] = _MergedSubtitleLang(
-          displayName: rawLang,
+          displayName: _displayLanguageName(rawLang),
           captions: const <StreamCaption>[],
           offers: <ExternalSubtitleOffer>[o],
         );
@@ -3648,13 +3878,14 @@ class _SourcesCatalogSheet extends StatelessWidget {
       variants[key]!.add(s);
     }
 
-    return Column(
+    return SingleChildScrollView(
+      child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Expanded(
-          child: ListView.builder(
+          ListView.builder(
             primary: false,
             shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
             itemCount: order.length,
             itemBuilder: (BuildContext context, int index) {
               final String key = order[index];
@@ -3798,7 +4029,6 @@ class _SourcesCatalogSheet extends StatelessWidget {
               );
             },
           ),
-        ),
         const Divider(color: AppColors.utilsDivider, height: AppSpacing.x4),
         Text(
           'cinepro returned these providers for this title. Pick one to '
@@ -3817,6 +4047,7 @@ class _SourcesCatalogSheet extends StatelessWidget {
           ),
         ),
       ],
+      ),
     );
   }
 

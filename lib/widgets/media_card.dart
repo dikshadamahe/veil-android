@@ -8,7 +8,7 @@ import 'package:pstream_android/config/breakpoints.dart';
 import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/screens/detail_screen.dart';
-import 'package:pstream_android/screens/scraping_screen.dart';
+import 'package:pstream_android/screens/player_screen.dart';
 import 'package:shimmer/shimmer.dart';
 
 /// What happens when [MediaCard] is tapped. [detail] (default) opens the
@@ -236,29 +236,26 @@ class MediaCard extends ConsumerWidget {
   ) {
     final int? resumeFromSecs = (progress?['positionSecs'] as num?)?.toInt();
 
-    final ScrapingScreenArgs args = ScrapingScreenArgs(
+    // The player fetches its own sources now (no separate "finding sources"
+    // gate). seasonTmdbId / episodeTmdbId / seasonTitle are left null — the
+    // server has sane defaults — so the tap stays instant.
+    final PlayerScreenArgs args = PlayerScreenArgs(
       mediaItem: mediaItem,
+      omssResponse: null,
       season: latestEpisode?.season,
       episode: latestEpisode?.episode,
-      // seasonTmdbId / episodeTmdbId / seasonTitle: server has sane defaults
-      // when these are null (`Season N`, `${tmdb}-s${n}-e${m}`), so skipping
-      // the TMDB detail fetch here keeps the tap instant.
       resumeFrom: resumeFromSecs,
+      replaceEpoch: DateTime.now().microsecondsSinceEpoch,
     );
 
     if (GoRouter.maybeOf(context) case final GoRouter router) {
-      router.push('/scraping', extra: args);
+      router.push('/player', extra: args);
       return;
     }
 
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ScrapingScreen(
-          mediaItem: args.mediaItem,
-          season: args.season,
-          episode: args.episode,
-          resumeFrom: args.resumeFrom,
-        ),
+        builder: (_) => PlayerScreen(args: args),
       ),
     );
   }
