@@ -240,6 +240,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// True after one software-decode retry so we don't loop forever.
   bool _hwdecFallbackAttempted = false;
 
+  /// Resolved URLs that already failed to play this session. Auto-fallback
+  /// uses this so it never loops back to a known-bad source.
+  final Set<String> _failedSourceUrls = <String>{};
+
+  /// Guards re-entrant auto-fallback while a fallback reload is in flight.
+  bool _autoFallbackInProgress = false;
+
   void _debugPlayer(String event, [Map<String, Object?> data = const {}]) {
     final Map<String, Object?> fields = <String, Object?>{
       'ready': _playerReady,
@@ -451,11 +458,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (cap != LocalStorage.qualityCapAuto) {
       final int? capLines = _qualityCapToLines(cap);
       if (capLines != null) {
-        final MapEntry<String, StreamQuality>? best =
-            _bestQualityAtOrBelow(capLines);
-        if (best != null && (best.value.url?.isNotEmpty ?? false)) {
-          _selectedQualityKey = best.key;
-          _selectedQualityUrl = best.value.url;
+        // Honor the quality cap by starting on the best OMSS variant of the
+        // active provider whose quality is at or below the cap.
+        final OmssSource? best = _bestVariantAtOrBelow(capLines);
+        if (best != null) {
+          _activeSource = best;
+          _activeStreamResult = _synthesizeStreamResult(_omssResponse, best);
         }
       }
     }
@@ -474,32 +482,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     };
   }
 
-  /// Pick the highest [StreamQuality] whose key (e.g. `1080`, `720p`) parses
-  /// to a height ≤ [maxLines]. Falls back to null when no quality fits.
-  MapEntry<String, StreamQuality>? _bestQualityAtOrBelow(int maxLines) {
-    final List<MapEntry<String, StreamQuality>> candidates = _availableQualities
-        .where((MapEntry<String, StreamQuality> entry) {
-          final int? lines = _parseQualityLines(entry.key);
-          return lines != null && lines <= maxLines;
-        })
-        .toList();
-    if (candidates.isEmpty) {
-      return null;
+  /// Pick the highest quality variant of the active provider whose quality is
+  /// at or below [maxLines]. Falls back to null when no variant fits.
+  OmssSource? _bestVariantAtOrBelow(int maxLines) {
+    for (final OmssSource s in _qualityVariantsForActiveProvider) {
+      final int rank = _omssQualityRank(s.quality);
+      if (rank > 0 && rank <= maxLines) {
+        return s;
+      }
     }
-    candidates.sort((a, b) {
-      final int aLines = _parseQualityLines(a.key) ?? 0;
-      final int bLines = _parseQualityLines(b.key) ?? 0;
-      return bLines.compareTo(aLines);
-    });
-    return candidates.first;
-  }
-
-  static int? _parseQualityLines(String key) {
-    final RegExpMatch? match = RegExp(r'(\d{3,4})').firstMatch(key);
-    if (match == null) {
-      return null;
-    }
-    return int.tryParse(match.group(1)!);
+    return null;
   }
 
   /// Map a sidecar caption to the country flag emoji that the web UI shows
@@ -1020,6 +1012,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     // Error
     if (v.hasError) {
       _debugPlayer('stream.error', <String, Object?>{'error': v.errorDescription});
+      // Auto-advance to the next source before surfacing the error card so a
+      // single dead provider/quality doesn't block playback.
+      if (_tryAutoFallback()) {
+        return;
+      }
       setState(() {
         _openingStream = false;
         _hasPlaybackError = true;
@@ -1189,6 +1186,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     } catch (error) {
       _debugPlayer('open.catch', <String, Object?>{'error': '$error'});
       if (!mounted) {
+        return;
+      }
+      // Try the next source automatically before showing the error card.
+      if (_tryAutoFallback()) {
         return;
       }
       setState(() {
@@ -1386,6 +1387,62 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     await _openStream(resumeFrom: resumePos > 0 ? resumePos : null);
   }
 
+  /// On a playback failure, transparently try the next untried OMSS source
+  /// (any provider/quality) before surfacing the error card. This recovers
+  /// from a dead initial source — the exact case where the user previously
+  /// had to open Sources and switch manually.
+  ///
+  /// Returns true when a fallback was started (so the caller should not show
+  /// the error card), false when every source has been exhausted.
+  bool _tryAutoFallback() {
+    if (_autoFallbackInProgress) {
+      return true;
+    }
+    _failedSourceUrls.add(_activeSource.resolvedUrl);
+    OmssSource? next;
+    for (final OmssSource s in _omssResponse.sources) {
+      if (!_failedSourceUrls.contains(s.resolvedUrl)) {
+        next = s;
+        break;
+      }
+    }
+    if (next == null) {
+      _debugPlayer('fallback.exhausted');
+      return false;
+    }
+    _autoFallbackInProgress = true;
+    unawaited(_runAutoFallback(next));
+    return true;
+  }
+
+  Future<void> _runAutoFallback(OmssSource target) async {
+    if (!mounted) {
+      _autoFallbackInProgress = false;
+      return;
+    }
+    final int resumeFrom = _position.inSeconds;
+    _debugPlayer('fallback.begin', <String, Object?>{
+      'provider': target.providerName,
+      'quality': target.quality ?? 'unknown',
+    });
+    _videoStallTimer?.cancel();
+    setState(() {
+      _activeSource = target;
+      _activeStreamResult = _synthesizeStreamResult(_omssResponse, target);
+      _selectedQualityKey = null;
+      _selectedQualityUrl = null;
+      _hasPlaybackError = false;
+      _playbackError = null;
+      _playerReady = false;
+      _buffering = true;
+      _hasFirstVideoFrame = false;
+      _hwdecFallbackAttempted = false;
+    });
+    _playerSettingsLabelRev.value++;
+    await _openStream(resumeFrom: resumeFrom > 0 ? resumeFrom : null);
+    _autoFallbackInProgress = false;
+  }
+
   Future<void> _persistProgress({bool refresh = true}) async {
     await _persistProgressValues(
       positionSecs: _position.inSeconds,
@@ -1524,7 +1581,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.transparent,
-      barrierColor: AppColors.transparent,
+      // A dim barrier keeps a previously opened sheet from bleeding through
+      // when a sub-sheet (e.g. Sources) is stacked on top of the settings hub.
+      barrierColor: AppColors.blackC50.withValues(alpha: 0.55),
       builder: (BuildContext context) {
         return builder(context);
       },
@@ -1648,15 +1707,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               );
             },
             child: _SourcesCatalogSheet(
-              sources: _omssResponse.sources,
-              currentSourceId: _activeSource.providerId,
+              allSources: _omssResponse.sources,
+              currentProviderKey: _omssProviderKey(_activeSource),
               refreshing: _refreshingSources,
-              switchingSourceId: _pendingSourceId,
+              switchingProviderKey: _pendingSourceId,
               onRefreshSources: () {
                 unawaited(_runSourceProbeForCatalog());
               },
-              onPick: (OmssSource source) {
-                Navigator.of(context).pop(source);
+              onPickProvider: (String providerKey) {
+                Navigator.of(context).pop(_bestVariantForProvider(providerKey));
               },
             ),
           ),
@@ -1665,18 +1724,38 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
 
     if (selectedSource == null ||
-        selectedSource.providerId == _activeSource.providerId) {
+        _omssProviderKey(selectedSource) ==
+            _omssProviderKey(_activeSource)) {
       return;
     }
 
     await _switchSource(selectedSource);
   }
 
+  /// Chooses which quality variant to play when the user picks a provider in
+  /// the Source sheet: prefer one matching the current quality, else the
+  /// highest available for that provider.
+  OmssSource _bestVariantForProvider(String providerKey) {
+    final List<OmssSource> variants = _omssResponse.sources
+        .where((OmssSource s) => _omssProviderKey(s) == providerKey)
+        .toList()
+      ..sort((OmssSource a, OmssSource b) =>
+          _omssQualityRank(b.quality).compareTo(_omssQualityRank(a.quality)));
+    final int currentRank = _omssQualityRank(_activeSource.quality);
+    for (final OmssSource v in variants) {
+      if (_omssQualityRank(v.quality) == currentRank) {
+        return v;
+      }
+    }
+    return variants.first;
+  }
+
   Future<void> _openQualitySheet() async {
     _showControls();
-    final List<MapEntry<String, StreamQuality>> qualities = _availableQualities;
-    final bool hasQualities = qualities.isNotEmpty;
-    final bool hasMultipleQualities = qualities.length > 1;
+    // Qualities come from the OMSS sibling sources of the active provider
+    // (cinepro returns one source per (provider, quality) pair).
+    final List<OmssSource> variants = _qualityVariantsForActiveProvider;
+    final bool hasQualities = variants.isNotEmpty;
 
     await _showPlayerSheet<void>(
       builder: (BuildContext context) {
@@ -1688,41 +1767,25 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               child: _PlayerOptionSheet(
                 title: 'Quality',
                 onBack: () => Navigator.of(context).pop(),
-                footer: hasMultipleQualities
-                    ? _PlayerToggleRow(
-                        title: 'Automatic quality',
-                        subtitle:
-                            'Use the source default unless you explicitly select a stream quality.',
-                        value: _selectedQualityKey == null,
-                        onChanged: (bool value) {
-                          if (value) {
-                            _selectQuality(null);
-                          }
-                          setSheetState(() {});
-                        },
-                      )
-                    : null,
                 child: hasQualities
                     ? ListView.builder(
+                        primary: false,
                         shrinkWrap: true,
-                        itemCount: qualities.length,
+                        itemCount: variants.length,
                         itemBuilder: (BuildContext context, int index) {
-                          final MapEntry<String, StreamQuality> quality =
-                              qualities[index];
+                          final OmssSource variant = variants[index];
                           final bool isSelected =
-                              _selectedQualityKey == quality.key ||
-                              (_selectedQualityKey == null &&
-                                  _activeStreamResult.stream
-                                          .selectedQuality ==
-                                      quality.key);
+                              variant.resolvedUrl == _activeSource.resolvedUrl;
 
                           return _PlayerOptionRow(
-                            title: quality.key,
-                            subtitle: quality.value.type,
+                            title: _omssQualityLabel(variant),
+                            subtitle: variant.type.toUpperCase(),
                             selected: isSelected,
                             onTap: () {
-                              _selectQuality(quality.key);
-                              setSheetState(() {});
+                              if (!isSelected) {
+                                Navigator.of(context).pop();
+                                unawaited(_switchToQualityVariant(variant));
+                              }
                             },
                           );
                         },
@@ -1745,6 +1808,49 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         );
       },
     );
+  }
+
+  /// All quality variants for the active provider, highest quality first.
+  List<OmssSource> get _qualityVariantsForActiveProvider {
+    final String key = _omssProviderKey(_activeSource);
+    final List<OmssSource> out = _omssResponse.sources
+        .where((OmssSource s) => _omssProviderKey(s) == key)
+        .toList()
+      ..sort((OmssSource a, OmssSource b) =>
+          _omssQualityRank(b.quality).compareTo(_omssQualityRank(a.quality)));
+    return out;
+  }
+
+  /// Switches to a sibling source (same provider, different quality) in place,
+  /// preserving the playback position. Unlike a provider switch, this does not
+  /// rebuild the whole player route.
+  Future<void> _switchToQualityVariant(OmssSource variant) async {
+    if (!mounted || variant.resolvedUrl == _activeSource.resolvedUrl) {
+      return;
+    }
+    final int resumeFrom = _position.inSeconds;
+    await _persistProgress();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _activeSource = variant;
+      _activeStreamResult = _synthesizeStreamResult(_omssResponse, variant);
+      _selectedQualityKey = null;
+      _selectedQualityUrl = null;
+      _playerReady = false;
+      _buffering = true;
+      _hasFirstVideoFrame = false;
+      _hwdecFallbackAttempted = false;
+    });
+    _playerSettingsLabelRev.value++;
+    await _openStream(resumeFrom: resumeFrom > 0 ? resumeFrom : null);
+    if (mounted) {
+      _setSubtitleState(
+        enabled: _subtitlesEnabled,
+        message: 'Quality: ${_omssQualityLabel(variant)}',
+      );
+    }
   }
 
   Future<OnlineSubtitleSearchResult> _loadOnlineSubtitleSearch() async {
@@ -2827,12 +2933,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             unawaited(_onVerticalDragUpdate(details));
           },
           onVerticalDragEnd: _onVerticalDragEnd,
-          child: SafeArea(
-            child: Stack(
-              fit: StackFit.expand,
-              children: <Widget>[
-                _PlayerBackdrop(mediaItem: widget.args.mediaItem),
-                Positioned.fill(
+          // Backdrop + video fill the entire screen (edge-to-edge, under the
+          // display cutout) so playback is truly full-screen. Only the
+          // controls/overlays below are wrapped in SafeArea.
+          child: Stack(
+            fit: StackFit.expand,
+            children: <Widget>[
+              _PlayerBackdrop(mediaItem: widget.args.mediaItem),
+              Positioned.fill(
                   child: IgnorePointer(
                     child: (_playerReady && _controller != null && _controller!.value.isInitialized)
                         ? AnimatedOpacity(
@@ -2986,7 +3094,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       ),
                     ),
                   ),
-                PlayerControls(
+                SafeArea(
+                  child: PlayerControls(
                   visible: _controlsVisible && !_controlsLocked,
                   mediaTitle: title,
                   isPlaying: _playing,
@@ -3007,6 +3116,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   onToggleAutoRotate: _toggleAutoRotate,
                   onLock: _lockControls,
                   onNextEpisode: _playNextEpisode,
+                  ),
                 ),
                 if (_subtitlesEnabled && _currentSubtitleText.isNotEmpty && _playerReady)
                   AnimatedPositioned(
@@ -3066,7 +3176,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   ),
               ],
             ),
-          ),
         ),
       ),
     );
@@ -3092,14 +3201,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   List<StreamCaption> get _availableCaptions {
     return _activeStreamResult.stream.captions
         .where((StreamCaption caption) => caption.url?.isNotEmpty == true)
-        .toList(growable: false);
-  }
-
-  List<MapEntry<String, StreamQuality>> get _availableQualities {
-    return _activeStreamResult.stream.qualities.entries
-        .where((MapEntry<String, StreamQuality> entry) {
-          return entry.value.url?.isNotEmpty == true;
-        })
         .toList(growable: false);
   }
 
@@ -3213,11 +3314,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   String get _currentQualityLabel {
-    return _selectedQualityKey ??
-        _activeStreamResult.stream.selectedQuality ??
-        (_availableQualities.isNotEmpty
-            ? _availableQualities.first.key
-            : 'Auto');
+    final String? q = _activeSource.quality;
+    if (q != null && q.trim().isNotEmpty) {
+      return q.trim();
+    }
+    return 'Auto';
   }
 
   String get _currentSubtitleLabel {
@@ -3298,40 +3399,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
 
     _subtitlesEnabled = false;
-  }
-
-  Future<void> _selectQuality(String? qualityKey) async {
-    final int resumeFrom = _position.inSeconds;
-    final String? qualityUrl = qualityKey == null
-        ? null
-        : _activeStreamResult.stream.qualities[qualityKey]?.url;
-
-    if (qualityKey != null && (qualityUrl == null || qualityUrl.isEmpty)) {
-      _setSubtitleState(
-        enabled: _subtitlesEnabled,
-        message: 'Selected quality is unavailable',
-      );
-      return;
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _selectedQualityKey = qualityKey;
-      _selectedQualityUrl = qualityUrl;
-      _playerReady = false;
-      _buffering = true;
-    });
-
-    await _openStream(resumeFrom: resumeFrom);
-    _setSubtitleState(
-      enabled: _subtitlesEnabled,
-      message: qualityKey == null
-          ? 'Automatic quality enabled'
-          : 'Quality: $qualityKey',
-    );
   }
 
   Future<void> _disableSubtitles() async {
@@ -3497,29 +3564,90 @@ class _NextEpisodeTarget {
   final String label;
 }
 
-/// Source list backed by the cached OMSS v1.0 response. The refresh
-/// button re-issues the same `GET /v1/...` against the resolver; per-
-/// source probes are not needed because every source already carries
-/// a playable URL.
+/// Groups OMSS sources that share a provider. cinepro returns one entry per
+/// (provider, quality) pair, so several rows can carry the same provider — the
+/// Source sheet collapses them to one row per provider and the Quality sheet
+/// lists the per-provider quality variants.
+String _omssProviderKey(OmssSource s) =>
+    s.providerId.isNotEmpty ? s.providerId : s.providerName;
+
+/// Rough numeric rank for a free-form quality label so variants sort
+/// highest-first ("1080p" > "720p" > "360p").
+int _omssQualityRank(String? quality) {
+  if (quality == null) {
+    return -1;
+  }
+  final String q = quality.toLowerCase();
+  if (q.contains('2160') || q.contains('4k')) {
+    return 2160;
+  }
+  if (q.contains('1440') || q.contains('2k')) {
+    return 1440;
+  }
+  if (q.contains('1080')) {
+    return 1080;
+  }
+  if (q.contains('720')) {
+    return 720;
+  }
+  if (q.contains('480')) {
+    return 480;
+  }
+  if (q.contains('360')) {
+    return 360;
+  }
+  if (q.contains('240')) {
+    return 240;
+  }
+  final RegExpMatch? m = RegExp(r'(\d{3,4})').firstMatch(q);
+  return m != null ? (int.tryParse(m.group(1)!) ?? 0) : 0;
+}
+
+/// Display label for a single quality variant.
+String _omssQualityLabel(OmssSource s) {
+  final String? q = s.quality;
+  return (q != null && q.trim().isNotEmpty) ? q.trim() : 'Default';
+}
+
+/// Source list backed by the cached OMSS v1.0 response. Each row is a single
+/// provider (its quality variants are picked separately in the Quality sheet).
+/// The refresh button re-issues the same `GET /v1/...` against the resolver.
 class _SourcesCatalogSheet extends StatelessWidget {
   const _SourcesCatalogSheet({
-    required this.sources,
-    required this.currentSourceId,
+    required this.allSources,
+    required this.currentProviderKey,
     required this.refreshing,
-    required this.switchingSourceId,
+    required this.switchingProviderKey,
     required this.onRefreshSources,
-    required this.onPick,
+    required this.onPickProvider,
   });
 
-  final List<OmssSource> sources;
-  final String currentSourceId;
+  /// Every OMSS source (all provider/quality pairs). Grouped by provider here.
+  final List<OmssSource> allSources;
+  final String currentProviderKey;
   final bool refreshing;
-  final String? switchingSourceId;
+  final String? switchingProviderKey;
   final VoidCallback onRefreshSources;
-  final void Function(OmssSource source) onPick;
+  final void Function(String providerKey) onPickProvider;
 
   @override
   Widget build(BuildContext context) {
+    // Collapse to one entry per provider, preserving first-seen order, and
+    // remember every quality variant so we can summarise them on the row.
+    final List<String> order = <String>[];
+    final Map<String, OmssSource> representative = <String, OmssSource>{};
+    final Map<String, List<OmssSource>> variants =
+        <String, List<OmssSource>>{};
+    for (final OmssSource s in allSources) {
+      final String key = _omssProviderKey(s);
+      if (!representative.containsKey(key)) {
+        order.add(key);
+        representative[key] = s;
+        variants[key] = <OmssSource>[];
+      }
+      variants[key]!.add(s);
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
@@ -3527,11 +3655,14 @@ class _SourcesCatalogSheet extends StatelessWidget {
           child: ListView.builder(
             primary: false,
             shrinkWrap: true,
-            itemCount: sources.length,
+            itemCount: order.length,
             itemBuilder: (BuildContext context, int index) {
-              final OmssSource source = sources[index];
-              final bool isCurrent = source.providerId == currentSourceId;
-              final bool isSwitching = source.providerId == switchingSourceId;
+              final String key = order[index];
+              final OmssSource source = representative[key]!;
+              final List<OmssSource> providerVariants = variants[key]!;
+              final bool isCurrent = key == currentProviderKey;
+              final bool isSwitching = key == switchingProviderKey;
+              final String qualitySummary = _qualitySummary(providerVariants);
               return DecoratedBox(
                 decoration: BoxDecoration(
                   color: isCurrent
@@ -3545,7 +3676,7 @@ class _SourcesCatalogSheet extends StatelessWidget {
                 child: Material(
                   color: Colors.transparent,
                   child: InkWell(
-                    onTap: isSwitching ? null : () => onPick(source),
+                    onTap: isSwitching ? null : () => onPickProvider(key),
                     borderRadius: BorderRadius.circular(AppSpacing.x4),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
@@ -3587,61 +3718,22 @@ class _SourcesCatalogSheet extends StatelessWidget {
                                 const SizedBox(height: AppSpacing.x1),
                                 Row(
                                   children: <Widget>[
-                                    // Quality pill badge
-                                    if (source.quality != null &&
-                                        source.quality!.isNotEmpty)
-                                      Container(
-                                        margin: const EdgeInsets.only(
-                                          right: AppSpacing.x2,
-                                        ),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: AppSpacing.x2,
-                                          vertical: 2,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: AppColors.purpleC600
-                                              .withValues(alpha: 0.2),
-                                          borderRadius:
-                                              BorderRadius.circular(
-                                            AppSpacing.x2,
-                                          ),
-                                        ),
+                                    if (qualitySummary.isNotEmpty)
+                                      Flexible(
                                         child: Text(
-                                          source.quality!.toUpperCase(),
+                                          qualitySummary,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
                                           style: Theme.of(context)
                                               .textTheme
                                               .labelSmall
                                               ?.copyWith(
-                                                color: AppColors.purpleC100,
-                                                fontWeight: FontWeight.w700,
-                                                letterSpacing: 0.5,
+                                                color:
+                                                    AppColors.typeSecondary,
+                                                letterSpacing: 0.3,
                                               ),
                                         ),
                                       ),
-                                    // Type pill badge
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: AppSpacing.x2,
-                                        vertical: 2,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: AppColors.blackC125
-                                            .withValues(alpha: 0.6),
-                                        borderRadius: BorderRadius.circular(
-                                          AppSpacing.x2,
-                                        ),
-                                      ),
-                                      child: Text(
-                                        source.type.toUpperCase(),
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .labelSmall
-                                            ?.copyWith(
-                                              color: AppColors.typeSecondary,
-                                              letterSpacing: 0.5,
-                                            ),
-                                      ),
-                                    ),
                                   ],
                                 ),
                                 if (isSwitching)
@@ -3709,9 +3801,10 @@ class _SourcesCatalogSheet extends StatelessWidget {
         ),
         const Divider(color: AppColors.utilsDivider, height: AppSpacing.x4),
         Text(
-          'cinepro returned these playable sources for this title. '
-          'Pick one to switch. "Refresh sources" re-issues the same request '
-          'in case a previously unavailable provider is back.',
+          'cinepro returned these providers for this title. Pick one to '
+          'switch — choose a stream quality from the Quality menu. '
+          '"Refresh sources" re-issues the same request in case a previously '
+          'unavailable provider is back.',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: AppColors.typeSecondary,
               ),
@@ -3726,6 +3819,29 @@ class _SourcesCatalogSheet extends StatelessWidget {
       ],
     );
   }
+
+  /// "MP4 · 1080p, 720p, 360p" style summary for a provider's variants.
+  static String _qualitySummary(List<OmssSource> variants) {
+    final List<OmssSource> sorted = List<OmssSource>.from(variants)
+      ..sort((OmssSource a, OmssSource b) =>
+          _omssQualityRank(b.quality).compareTo(_omssQualityRank(a.quality)));
+    final List<String> qualities = <String>[];
+    for (final OmssSource s in sorted) {
+      final String label = _omssQualityLabel(s).toUpperCase();
+      if (!qualities.contains(label)) {
+        qualities.add(label);
+      }
+    }
+    final String types = sorted
+        .map((OmssSource s) => s.type.toUpperCase())
+        .toSet()
+        .join('/');
+    final String qualityPart = qualities.join(', ');
+    if (types.isEmpty) {
+      return qualityPart;
+    }
+    return qualityPart.isEmpty ? types : '$types · $qualityPart';
+  }
 }
 
 class _PlayerSheetScaffold extends StatelessWidget {
@@ -3736,31 +3852,46 @@ class _PlayerSheetScaffold extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final _PlayerSheetMetrics metrics = _PlayerSheetMetrics.of(context);
+    final Size screen = MediaQuery.sizeOf(context);
+    // Cap the width so the sheet does not stretch across a full landscape
+    // screen, and cap the height so it never covers the whole viewport.
+    // Both scale with the device, keeping the sheet compact everywhere.
+    final double maxWidth = screen.width >= 640 ? 560.0 : screen.width;
+    final double maxHeight = screen.height * 0.92;
     return SafeArea(
       top: false,
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          metrics.outerInset,
-          metrics.outerInset,
-          metrics.outerInset,
-          metrics.bottomInset,
-        ),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: AppColors.glassSheet,
-            borderRadius: BorderRadius.circular(metrics.sheetRadius),
-            border: Border.all(color: AppColors.glassBorder),
-            boxShadow: <BoxShadow>[
-              BoxShadow(
-                color: AppColors.blackC50.withValues(alpha: 0.45),
-                blurRadius: 16,
-                offset: const Offset(0, 4),
-              ),
-            ],
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: maxWidth,
+            maxHeight: maxHeight,
           ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(metrics.sheetRadius),
-            child: child,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              metrics.outerInset,
+              metrics.outerInset,
+              metrics.outerInset,
+              metrics.bottomInset,
+            ),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppColors.glassSheet,
+                borderRadius: BorderRadius.circular(metrics.sheetRadius),
+                border: Border.all(color: AppColors.glassBorder),
+                boxShadow: <BoxShadow>[
+                  BoxShadow(
+                    color: AppColors.blackC50.withValues(alpha: 0.45),
+                    blurRadius: 16,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(metrics.sheetRadius),
+                child: child,
+              ),
+            ),
           ),
         ),
       ),
@@ -4557,65 +4688,6 @@ class _PlayerLanguageRow extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-class _PlayerToggleRow extends StatelessWidget {
-  const _PlayerToggleRow({
-    required this.title,
-    required this.subtitle,
-    required this.value,
-    required this.onChanged,
-  });
-
-  final String title;
-  final String subtitle;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-  static const bool enabled = true;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: <Widget>[
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                title,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  color: enabled
-                      ? AppColors.typeEmphasis
-                      : AppColors.typeSecondary,
-                ),
-              ),
-              const SizedBox(height: AppSpacing.x1),
-              Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
-            ],
-          ),
-        ),
-        const SizedBox(width: AppSpacing.x3),
-        // Pin off-state colors so the pill is grey when off (Material 3
-        // defaults give a purple thumb on dark backgrounds).
-        Switch(
-          value: value,
-          onChanged: enabled ? onChanged : null,
-          activeThumbColor: AppColors.typeEmphasis,
-          activeTrackColor: AppColors.buttonsPurple,
-          inactiveThumbColor: AppColors.typeSecondary,
-          inactiveTrackColor: AppColors.dropdownBorder,
-          trackOutlineColor: WidgetStateProperty.resolveWith<Color?>(
-            (Set<WidgetState> states) {
-              if (states.contains(WidgetState.selected)) {
-                return AppColors.buttonsPurple;
-              }
-              return AppColors.dropdownBorder;
-            },
-          ),
-        ),
-      ],
     );
   }
 }
