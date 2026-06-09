@@ -13,43 +13,88 @@
   &nbsp;
   <img src="https://img.shields.io/badge/Flutter-3.x-02569B?style=flat-square&logo=flutter&logoColor=white" alt="Flutter" />
   &nbsp;
-  <img src="https://img.shields.io/badge/release-1.0.0-7C3AED?style=flat-square&labelColor=1a1a2e" alt="Version" />
+  <img src="https://img.shields.io/badge/release-1.0.1-7C3AED?style=flat-square&labelColor=1a1a2e" alt="Version" />
 </p>
 
 ---
 
-> **Aggregator only.** Veil does not host video, store media, or act as a CDN. It connects your TMDB catalog to playback in **media_kit** by asking a self-hosted **cinepro-org/core** resolver for every playable source it can find.
+> **Aggregator only.** Veil does not host video, store media, or act as a CDN. It connects your TMDB catalog to in-app playback by asking a self-hosted **[cinepro-org/core](https://github.com/cinepro-org/core)** resolver for playable sources — then hands each `source.url` straight to **media_kit** (libmpv).
 
 ---
 
 ## At a glance
 
-**Discover** — Trending & search, movies & TV, detail pages; posters and metadata from **TMDB**.
+| | |
+|:---|:---|
+| **Discover** | Trending, search, detail pages — posters and metadata from **TMDB** (direct from the app). |
+| **Resolve** | One HTTP GET to **cinepro-org/core** returns every provider that has the title, with proxy URLs already absolute. No client-side scraping, WebView hooks, or SSE pipeline. |
+| **Play** | The player fetches sources inline, auto-fallbacks on failure, and exposes provider-grouped source switching, quality variants, resume, continue watching, and optional online subtitles. |
 
-**Play** — In-app player with resume, bookmarks, continue watching, subtitles, and adaptive controls.
-
-**Resolve** — One HTTP call to the self-hosted **cinepro-org/core** resolver returns every source that has the title, with the playable URL already proxied. The app hands `source.url` straight to **media_kit** — no client-side scraping, no per-provider WebView hooks, no SSE pipeline.
-
-Screens follow the **[xp-technologies-dev/p-stream](https://github.com/xp-technologies-dev/p-stream)** web reference (Flutter widgets mapped from the original `.tsx` sources).
+UI follows the **[xp-technologies-dev/p-stream](https://github.com/xp-technologies-dev/p-stream)** web reference — Flutter widgets mapped from the original `.tsx` sources.
 
 ---
 
-## Flow
+## Architecture
 
 ```mermaid
-flowchart LR
-  V(["Veil"]) --> T["TMDB\nmetadata"]
-  V -->|"GET /v1/movies/{tmdbId}\nGET /v1/tv/{tmdbId}/seasons/{s}/episodes/{e}"| C["cinepro-org/core\n:3001"]
-  C -->|"sources[] with absolute proxy URLs"| V
-  V -->|"play source.url via media_kit"| P["media_kit\n(libmpv)"]
-  C -->|"GET /v1/proxy?data=…"| S["upstream CDNs"]
+flowchart TB
+  subgraph client["Veil · Flutter Android"]
+    UI["Screens\nHome · Search · Detail · Player"]
+    TMDB["TmdbService"]
+    OMSS["StreamService\nOMSS v1.0 client"]
+    MK["media_kit · libmpv"]
+    UI --> TMDB
+    UI --> OMSS
+    UI --> MK
+  end
+
+  subgraph external["External services"]
+    TAPI[("TMDB API\nmetadata")]
+    CORE["cinepro-org/core\n:3001 · OMSS v1.0"]
+    CDN[("Streaming CDNs")]
+  end
+
+  TMDB -->|"GET /3/*"| TAPI
+  OMSS -->|"GET /v1/movies/{id}\nGET /v1/tv/{id}/seasons/{s}/episodes/{e}"| CORE
+  CORE -->|"sources[] + subtitles[]\nabsolute /v1/proxy?data=… URLs"| OMSS
+  MK -->|"play source.url"| CORE
+  CORE -->|"GET /v1/proxy?data=…\nReferer · Origin · UA set server-side"| CDN
 ```
 
-| | |
-|:---|:---|
-| **Backend** | [`cinepro-org/core`](https://github.com/cinepro-org/core) — self-hosted **OMSS v1.0** resolver on port `3001` |
-| **Providers** | 14 built-in: CineSu, FshareTV, Icefy, Peachify, Popr, MafiaEmbed, Tulnex, VidApi, Videasy, VidNest, VidRock, VidSrc, VidZee, VixSrc |
-| **Proxy** | Provided by cinepro — `GET /v1/proxy?data={base64url}` |
+| Component | Role |
+|-----------|------|
+| **Flutter app** | TMDB browse + OMSS resolver client + local Hive storage (progress, bookmarks, history). |
+| **[cinepro-org/core](https://github.com/cinepro-org/core)** | Self-hosted **OMSS v1.0** resolver on port `3001`. Crawls 14 built-in providers and returns a populated `sources[]`. |
+| **Proxy** | `GET /v1/proxy?data={base64url}` — headers injected server-side; the app never sets `Referer` / `Origin` / `User-Agent` per provider. |
+
+**Built-in providers:** CineSu · FshareTV · Icefy · Peachify · Popr · MafiaEmbed · Tulnex · VidApi · Videasy · VidNest · VidRock · VidSrc · VidZee · VixSrc
+
+---
+
+## Playback flow
+
+There is no separate “finding sources” screen. Tapping **Play** opens the player, which resolves sources and starts playback in one place — with inline loading, retry, and source switching.
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant App as Veil Player
+  participant Core as cinepro-org/core
+  participant MPV as media_kit
+
+  User->>App: Play title
+  App->>Core: GET /v1/movies/{tmdbId}<br/>or /v1/tv/.../episodes/{e}
+  Core-->>App: OMSS JSON · sources[] · subtitles[]
+  App->>MPV: open(source.url)
+  MPV->>Core: stream via /v1/proxy?data=…
+  Core-->>MPV: HLS / MP4 bytes
+  Note over App,MPV: Resume offset · auto-fallback ·<br/>provider / quality picker
+
+  opt User switches source
+    User->>App: Pick another provider
+    App->>MPV: reload new source.url
+  end
+```
 
 ---
 
@@ -57,24 +102,26 @@ flowchart LR
 
 Flutter · Riverpod · go_router · Hive · media_kit · TMDB · cinepro-org/core (OMSS v1.0)
 
+Adaptive shell: bottom nav on phones, navigation rail on tablets and TV-sized layouts (`windowClass` breakpoints).
+
 ---
 
-## Backend
+## Backend API
 
-The resolver is **cinepro-org/core** (OMSS v1.0). It listens on **port 3001** and exposes a small, fixed API:
+The resolver is **[cinepro-org/core](https://github.com/cinepro-org/core)** (OMSS v1.0) on **port 3001**:
 
 ```bash
-# status
-curl http://127.0.0.1:3001/v1/health
+# Health
+curl http://YOUR_HOST:3001/v1/health
 
-# movie sources
-curl 'http://127.0.0.1:3001/v1/movies/550'
+# Movie sources
+curl 'http://YOUR_HOST:3001/v1/movies/550'
 
 # TV episode sources
-curl 'http://127.0.0.1:3001/v1/tv/1399/seasons/1/episodes/1'
+curl 'http://YOUR_HOST:3001/v1/tv/1399/seasons/1/episodes/1'
 ```
 
-A successful response:
+Example response:
 
 ```json
 {
@@ -82,7 +129,7 @@ A successful response:
   "expiresAt": "2026-06-05T18:30:00Z",
   "sources": [
     {
-      "url": "http://127.0.0.1:3001/v1/proxy?data=eyJ…",
+      "url": "http://YOUR_HOST:3001/v1/proxy?data=eyJ…",
       "type": "hls",
       "quality": "1080p",
       "audioTracks": [{ "language": "en", "label": "English" }],
@@ -91,7 +138,7 @@ A successful response:
   ],
   "subtitles": [
     {
-      "url": "http://127.0.0.1:3001/v1/proxy?data=…",
+      "url": "http://YOUR_HOST:3001/v1/proxy?data=…",
       "label": "English",
       "format": "vtt"
     }
@@ -100,23 +147,24 @@ A successful response:
 }
 ```
 
-`source.url` is already an **absolute proxy URL** — the Flutter app hands it straight to `media_kit`. The proxy handles `Referer` / `Origin` / `User-Agent` server-side; the app does not need to inject any headers.
+`source.url` is already an **absolute proxy URL** — pass it directly to `media_kit`. Do not prepend `ORACLE_URL` or inject playback headers in the client.
 
 ---
 
 ## Build
 
-Secrets stay out of source: pass **`--dart-define`** at build time. Prefer **HTTPS** in production.
+Secrets stay out of source: pass **`--dart-define`** at build time. Prefer **HTTPS** for production resolver URLs.
 
 ```bash
 flutter pub get
 dart run flutter_launcher_icons   # optional — syncs launcher from logo-circle.png
+flutter analyze
 flutter build apk --release \
   --dart-define=ORACLE_URL=http://YOUR_HOST:3001 \
   --dart-define=TMDB_TOKEN=YOUR_TMDB_READ_TOKEN
 ```
 
-CI runs **`flutter analyze`**, **`dart run flutter_launcher_icons`**, then the release APK with the same defines — configure **`ORACLE_URL`** and **`TMDB_TOKEN`** (or **`TMDB_READ_TOKEN`**) in GitHub variables or secrets.
+**CI / releases:** pushing a `v*` tag (or manual workflow dispatch) runs `flutter analyze` and builds `veil.apk`. Configure **`ORACLE_URL`** and **`TMDB_TOKEN`** (or **`TMDB_READ_TOKEN`**) as GitHub variables or secrets — the workflow fails fast if either is missing.
 
 <details>
 <summary><strong>Optional defines</strong> — subtitles, watch rules</summary>
@@ -137,9 +185,13 @@ CI runs **`flutter analyze`**, **`dart run flutter_launcher_icons`**, then the r
 
 | Path | Role |
 |------|------|
-| `lib/` | Flutter app |
+| `lib/screens/` | Home, search, detail, player, settings, history, my list |
+| `lib/services/` | `tmdb_service.dart`, `stream_service.dart` (OMSS client) |
+| `lib/models/` | `media_item.dart`, `omss_source.dart`, `omss_response.dart` |
+| `lib/config/` | `app_config.dart`, `app_theme.dart`, `router.dart`, breakpoints |
+| `lib/storage/` | Hive — progress, bookmarks, continue watching |
 | `android/` | Gradle, manifest, launcher assets |
-| `backend/` | **Legacy** — old `providers-api` (Express) + `providers-lib` (TypeScript sourcerers). The active resolver is the cinepro-org/core service running on the VM, **not** this folder. Kept for reference; safe to delete once a downstream migration is confirmed. |
+| `backend/` | **Legacy** — old `providers-api` + `providers-lib` stack. The active resolver is **cinepro-org/core** on the VM, not this folder. Kept for reference. |
 
 ---
 
