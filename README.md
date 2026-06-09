@@ -18,7 +18,7 @@
 
 ---
 
-> **Aggregator only.** Veil does not host video, store media, or act as a CDN. It connects your TMDB catalog to in-app playback by asking a self-hosted **[cinepro-org/core](https://github.com/cinepro-org/core)** resolver for playable sources — then hands each `source.url` straight to **media_kit** (libmpv).
+> **Aggregator only.** Veil does not host video, store media, or act as a CDN. It connects your TMDB catalog to in-app playback by asking a self-hosted **[cinepro-org/core](https://github.com/cinepro-org/core)** resolver for playable sources — then opens each `source.url` in **`video_player`** (ExoPlayer on Android).
 
 ---
 
@@ -42,10 +42,10 @@ flowchart TB
     UI["Screens\nHome · Search · Detail · Player"]
     TMDB["TmdbService"]
     OMSS["StreamService\nOMSS v1.0 client"]
-    MK["media_kit · libmpv"]
+    VP["video_player · ExoPlayer"]
     UI --> TMDB
     UI --> OMSS
-    UI --> MK
+    UI --> VP
   end
 
   subgraph external["External services"]
@@ -57,7 +57,7 @@ flowchart TB
   TMDB -->|"GET /3/*"| TAPI
   OMSS -->|"GET /v1/movies/{id}\nGET /v1/tv/{id}/seasons/{s}/episodes/{e}"| CORE
   CORE -->|"sources[] + subtitles[]\nabsolute /v1/proxy?data=… URLs"| OMSS
-  MK -->|"play source.url"| CORE
+  VP -->|"VideoPlayerController.networkUrl(source.url)"| CORE
   CORE -->|"GET /v1/proxy?data=…\nReferer · Origin · UA set server-side"| CDN
 ```
 
@@ -80,19 +80,19 @@ sequenceDiagram
   actor User
   participant App as Veil Player
   participant Core as cinepro-org/core
-  participant MPV as media_kit
+  participant Exo as video_player / ExoPlayer
 
   User->>App: Play title
   App->>Core: GET /v1/movies/{tmdbId}<br/>or /v1/tv/.../episodes/{e}
   Core-->>App: OMSS JSON · sources[] · subtitles[]
-  App->>MPV: open(source.url)
-  MPV->>Core: stream via /v1/proxy?data=…
-  Core-->>MPV: HLS / MP4 bytes
-  Note over App,MPV: Resume offset · auto-fallback ·<br/>provider / quality picker
+  App->>Exo: initialize(source.url, formatHint from source.type)
+  Exo->>Core: stream via /v1/proxy?data=…
+  Core-->>Exo: HLS / MP4 bytes
+  Note over App,Exo: Resume seek · auto-fallback ·<br/>provider / quality picker
 
   opt User switches source
     User->>App: Pick another provider
-    App->>MPV: reload new source.url
+    App->>Exo: dispose + re-initialize new source.url
   end
 ```
 
@@ -100,7 +100,7 @@ sequenceDiagram
 
 ## Stack
 
-Flutter · Riverpod · go_router · Hive · media_kit · TMDB · cinepro-org/core (OMSS v1.0)
+Flutter · Riverpod · go_router · Hive · video_player (ExoPlayer) · TMDB · cinepro-org/core (OMSS v1.0)
 
 Adaptive shell: bottom nav on phones, navigation rail on tablets and TV-sized layouts (`windowClass` breakpoints).
 
@@ -147,7 +147,7 @@ Example response:
 }
 ```
 
-`source.url` is already an **absolute proxy URL** — pass it directly to `media_kit`. Do not prepend `ORACLE_URL` or inject playback headers in the client.
+`source.url` is already an **absolute proxy URL**. The player passes it to `VideoPlayerController.networkUrl` with a **`formatHint`** derived from OMSS `source.type` (HLS/DASH/etc.) because proxy URLs have no file extension for ExoPlayer to infer. Do not prepend `ORACLE_URL` or inject playback headers in the client.
 
 ---
 

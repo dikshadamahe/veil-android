@@ -20,7 +20,7 @@
 //     "diagnostics": []
 //   }
 //
-// `source.url` is already absolute — the app hands it to media_kit
+// `source.url` is already absolute — the app opens it via video_player (ExoPlayer).
 // without prepending ORACLE_URL or injecting any headers. The proxy
 // sets Referer / Origin / User-Agent server-side.
 
