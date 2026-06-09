@@ -70,6 +70,7 @@ class ScrapingScreen extends ConsumerStatefulWidget {
 class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
   late final StreamService _streamService;
   Future<OmssResponse>? _request;
+  bool _navigated = false;
 
   @override
   void initState() {
@@ -88,14 +89,19 @@ class _ScrapingScreenState extends ConsumerState<ScrapingScreen> {
 
   void _retry() {
     setState(() {
+      _navigated = false;
       _request = _fetch();
     });
   }
 
   void _onSuccess(OmssResponse response) {
-    if (!mounted) {
+    // Guard against repeated navigation: GoRouter rebuilds this page each time
+    // a route is pushed, so the FutureBuilder's post-frame callback would fire
+    // again and push another /player, stacking players in an infinite loop.
+    if (!mounted || _navigated) {
       return;
     }
+    _navigated = true;
     context.push(
       '/player',
       extra: PlayerScreenArgs(

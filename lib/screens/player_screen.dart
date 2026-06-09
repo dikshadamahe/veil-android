@@ -1032,6 +1032,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  /// Maps the OMSS-declared stream type to a [VideoFormat] so the platform
+  /// player chooses the right media source for extension-less proxy URLs.
+  static VideoFormat? _videoFormatHint(StreamPlayback playback) {
+    final String t =
+        (playback.playbackType ?? playback.type ?? '').toLowerCase();
+    switch (t) {
+      case 'hls':
+      case 'm3u8':
+        return VideoFormat.hls;
+      case 'dash':
+      case 'mpd':
+        return VideoFormat.dash;
+      case 'ss':
+      case 'smoothstreaming':
+        return VideoFormat.ss;
+      default:
+        return null; // mp4 / progressive — let the platform infer.
+    }
+  }
+
   Future<void> _openStream({int? resumeFrom}) async {
     final StreamPlayback playback = _activeStreamResult.stream;
     final String? url = _selectedQualityUrl ?? _resolvePlayableUrl(playback);
@@ -1096,12 +1116,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
       _controller = null;
 
+      // The cinepro proxy URL has no file extension (`/v1/proxy?data=…`), so
+      // ExoPlayer/AVPlayer cannot infer the container from the URI and would
+      // default to a progressive source — which fails to parse an HLS/DASH
+      // playlist ("Source error"). Pass the OMSS-declared type as a format
+      // hint so the platform picks the correct media source.
+      final VideoFormat? formatHint = _videoFormatHint(playback);
       _debugPlayer('open.creating_controller', <String, Object?>{
         'url': _debugUrl(url),
+        'formatHint': formatHint?.name ?? 'none',
       });
       _controller = VideoPlayerController.networkUrl(
         Uri.parse(url),
         httpHeaders: headers,
+        formatHint: formatHint,
       );
 
       await _controller!.initialize();
