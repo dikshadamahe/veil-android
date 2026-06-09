@@ -13,7 +13,7 @@
   &nbsp;
   <img src="https://img.shields.io/badge/Flutter-3.x-02569B?style=flat-square&logo=flutter&logoColor=white" alt="Flutter" />
   &nbsp;
-  <img src="https://img.shields.io/badge/release-1.0.1-7C3AED?style=flat-square&labelColor=1a1a2e" alt="Version" />
+  <img src="https://img.shields.io/badge/release-3.0.x-7C3AED?style=flat-square&labelColor=1a1a2e" alt="Version" />
 </p>
 
 ---
