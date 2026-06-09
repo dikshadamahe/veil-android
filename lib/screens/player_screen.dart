@@ -4124,7 +4124,6 @@ class _PlayerOptionSheet extends StatelessWidget {
     required this.title,
     required this.child,
     required this.onBack,
-    this.footer,
     this.trailingText,
     this.onTrailingTap,
     this.titleTrailing,
@@ -4133,7 +4132,6 @@ class _PlayerOptionSheet extends StatelessWidget {
   final String title;
   final Widget child;
   final VoidCallback onBack;
-  final Widget? footer;
   final String? trailingText;
   final VoidCallback? onTrailingTap;
   final Widget? titleTrailing;
@@ -4182,12 +4180,6 @@ class _PlayerOptionSheet extends StatelessWidget {
             ),
             child: child,
           ),
-          if (footer != null) ...<Widget>[
-            SizedBox(height: metrics.itemGap),
-            const Divider(color: AppColors.utilsDivider, height: AppSpacing.x0),
-            SizedBox(height: metrics.itemGap),
-            footer!,
-          ],
         ],
       ),
     );
