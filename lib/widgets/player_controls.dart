@@ -28,6 +28,8 @@ class PlayerControls extends StatelessWidget {
     required this.onLock,
     required this.onNextEpisode,
     this.nextEpisodeLabel,
+    this.isLive = false,
+    this.liveProgramTitle,
   });
 
   final bool visible;
@@ -37,6 +39,14 @@ class PlayerControls extends StatelessWidget {
   final Duration duration;
   final Duration buffered;
   final bool showNextEpisode;
+
+  /// When true the seek bar + timecodes are replaced with a `● LIVE` badge
+  /// row (live HLS streams cannot be scrubbed). Defaults to false so the VOD
+  /// controls are unchanged.
+  final bool isLive;
+
+  /// Current EPG program title shown beside the LIVE badge (may be null).
+  final String? liveProgramTitle;
   final VoidCallback onBack;
   final Future<void> Function() onPlayPause;
   final Future<void> Function() onSeekBack;
@@ -177,27 +187,75 @@ class PlayerControls extends StatelessWidget {
                       padding: metrics.barPadding,
                       child: Column(
                         children: <Widget>[
-                          _SeekBar(
-                            position: position,
-                            duration: duration,
-                            buffered: buffered,
-                            onSeek: onSeek,
-                          ),
-                          SizedBox(height: metrics.compactGap),
+                          if (!isLive) ...<Widget>[
+                            _SeekBar(
+                              position: position,
+                              duration: duration,
+                              buffered: buffered,
+                              onSeek: onSeek,
+                            ),
+                            SizedBox(height: metrics.compactGap),
+                          ],
                           Row(
                             children: <Widget>[
-                              Text(
-                                _formatDuration(position),
-                                style: Theme.of(context).textTheme.labelMedium
-                                    ?.copyWith(fontSize: metrics.timeTextSize),
-                              ),
-                              SizedBox(width: metrics.compactGap),
-                              Text(
-                                '/ ${_formatDuration(duration)}',
-                                style: Theme.of(context).textTheme.labelMedium
-                                    ?.copyWith(fontSize: metrics.timeTextSize),
-                              ),
-                              const Spacer(),
+                              if (isLive) ...<Widget>[
+                                Container(
+                                  width: AppSpacing.x2,
+                                  height: AppSpacing.x2,
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: AppColors.semanticRedC200,
+                                  ),
+                                ),
+                                SizedBox(width: metrics.compactGap),
+                                Text(
+                                  'LIVE',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .labelMedium
+                                      ?.copyWith(
+                                        fontSize: metrics.timeTextSize,
+                                        color: AppColors.semanticRedC200,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                ),
+                                if (liveProgramTitle != null &&
+                                    liveProgramTitle!.isNotEmpty)
+                                  Expanded(
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(
+                                        left: AppSpacing.x3,
+                                        right: AppSpacing.x2,
+                                      ),
+                                      child: Text(
+                                        liveProgramTitle!,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelMedium
+                                            ?.copyWith(
+                                              fontSize: metrics.timeTextSize,
+                                            ),
+                                      ),
+                                    ),
+                                  )
+                                else
+                                  const Spacer(),
+                              ] else ...<Widget>[
+                                Text(
+                                  _formatDuration(position),
+                                  style: Theme.of(context).textTheme.labelMedium
+                                      ?.copyWith(fontSize: metrics.timeTextSize),
+                                ),
+                                SizedBox(width: metrics.compactGap),
+                                Text(
+                                  '/ ${_formatDuration(duration)}',
+                                  style: Theme.of(context).textTheme.labelMedium
+                                      ?.copyWith(fontSize: metrics.timeTextSize),
+                                ),
+                                const Spacer(),
+                              ],
                               IconButton(
                                 onPressed: () {
                                   unawaited(onOpenBrightness());

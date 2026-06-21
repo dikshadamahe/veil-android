@@ -32,6 +32,11 @@ class AdaptiveNav extends StatelessWidget {
       selectedIcon: Icons.bookmark_rounded,
     ),
     _AdaptiveNavDestination(
+      label: 'Live TV',
+      icon: Icons.live_tv_outlined,
+      selectedIcon: Icons.live_tv_rounded,
+    ),
+    _AdaptiveNavDestination(
       label: 'Settings',
       icon: Icons.settings_outlined,
       selectedIcon: Icons.settings_rounded,

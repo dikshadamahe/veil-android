@@ -60,6 +60,10 @@ class OmssSource {
   /// True if the source advertises an HLS playlist.
   bool get isHls => type == 'hls';
 
+  /// True if the source is an iframe embed player (e.g. XPass) rather than a
+  /// raw stream URL. Embed sources are rendered in a WebView, not video_player.
+  bool get isEmbed => type == 'embed';
+
   factory OmssSource.fromJson(Map<String, dynamic> json) {
     final Map<String, dynamic> provider = (json['provider'] is Map)
         ? Map<String, dynamic>.from(json['provider'] as Map)
