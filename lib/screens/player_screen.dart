@@ -23,17 +23,14 @@ import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/stream_provider.dart';
 import 'package:pstream_android/services/external_subtitle_service.dart';
 import 'package:pstream_android/services/stream_service.dart';
+import 'package:pstream_android/services/xpass_service.dart';
 import 'package:pstream_android/storage/local_storage.dart';
 
 import 'package:pstream_android/widgets/player_controls.dart';
+import 'package:pstream_android/widgets/xpass_embed_player.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 
 enum _PlayerEdgeSwipe { none, brightness, volume }
-
-/// Sentinel for "resolver responded but returned zero playable sources".
-class _NoSourcesError implements Exception {
-  const _NoSourcesError();
-}
 
 /// Per-source probe result for the "check streams" UI.
 /// One row in the subtitles sheet: embedded tracks + online offers for a language.
@@ -75,6 +72,9 @@ class PlayerScreenArgs {
     this.preservedCaption,
     this.preservedExternalOfferId,
     this.preservedExternalSummary,
+    this.isLive = false,
+    this.liveChannelName,
+    this.liveCurrentProgram,
   }) : _initialSourceIndex = initialSourceIndex;
 
   final MediaItem mediaItem;
@@ -108,6 +108,17 @@ class PlayerScreenArgs {
   final StreamCaption? preservedCaption;
   final String? preservedExternalOfferId;
   final String? preservedExternalSummary;
+
+  /// True when this player session is a Live TV channel (native HLS, no
+  /// resume/progress, no XPass injection, no seek). Defaults to false so the
+  /// existing VOD flow is unchanged.
+  final bool isLive;
+
+  /// Channel name shown as the title in the controls overlay for live mode.
+  final String? liveChannelName;
+
+  /// Current EPG program title shown beside the LIVE badge (may be null).
+  final String? liveCurrentProgram;
 
   /// The [OmssSource] the player should open with. Computed once at
   /// construction; the source sheet may swap to a different source by
@@ -260,6 +271,29 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// Guards re-entrant auto-fallback while a fallback reload is in flight.
   bool _autoFallbackInProgress = false;
 
+  /// True once [_activeSource] / [_omssResponse] have been assigned (they are
+  /// `late`). Guards the embed/live getters so they are safe to read before
+  /// playback is wired up (e.g. while sources are still loading or in dispose).
+  bool _sourceInitialized = false;
+
+  /// XPass embed player bridge — position/duration tracked here (no
+  /// [VideoPlayerController] exists in embed mode) and used for progress.
+  final XpassEmbedController _xpassController = XpassEmbedController();
+  double _xpassPosition = 0;
+  double _xpassDuration = 0;
+
+  /// True when the active source is an XPass-style iframe embed. Safe to read
+  /// before [_activeSource] is assigned.
+  bool get _activeSourceIsEmbed =>
+      _sourceInitialized && _activeSource.isEmbed;
+
+  /// True when the embed player is live on screen (controls differ from the
+  /// native video_player path).
+  bool get _isEmbedMode => _playerReady && _activeSourceIsEmbed;
+
+  /// True when this is a Live TV session.
+  bool get _isLive => widget.args.isLive;
+
   void _debugPlayer(String event, [Map<String, Object?> data = const {}]) {
     final Map<String, Object?> fields = <String, Object?>{
       'ready': _playerReady,
@@ -354,6 +388,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   void _initWithResponse(OmssResponse response, OmssSource initial) {
     _omssResponse = response;
     _activeSource = initial;
+    _sourceInitialized = true;
     _activeStreamResult = _synthesizeStreamResult(_omssResponse, _activeSource);
 
     _debugPlayer('init', <String, Object?>{
@@ -382,19 +417,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (!mounted) {
         return;
       }
-      if (response.isEmpty) {
-        setState(() {
-          _sourcesLoading = false;
-          _sourcesError = const _NoSourcesError();
-        });
-        return;
-      }
+      // Append the synthetic XPass embed source as a last-resort, lowest
+      // priority option. Because XPass is always present, the response is
+      // never empty here — so a title with zero OMSS sources still plays via
+      // the embed instead of surfacing [_NoSourcesError].
+      final OmssSource xpass = XpassService.buildSource(
+        widget.args.mediaItem,
+        season: widget.args.season,
+        episode: widget.args.episode,
+      );
+      final OmssResponse withXpass = OmssResponse(
+        responseId: response.responseId,
+        expiresAt: response.expiresAt,
+        sources: <OmssSource>[...response.sources, xpass],
+        subtitles: response.subtitles,
+        diagnostics: response.diagnostics,
+      );
       setState(() {
         _sourcesLoading = false;
       });
       _initWithResponse(
-        response,
-        widget.args.initialSourceFrom(response),
+        withXpass,
+        widget.args.initialSourceFrom(withXpass),
       );
       if (mounted) {
         setState(() {});
@@ -505,8 +549,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     WidgetsBinding.instance.removeObserver(this);
     // Capture before subscriptions/player tear-down so async persist does not
     // read mpv state after [Player.dispose] (race that dropped progress).
-    final int snapPos = _position.inSeconds;
-    final int snapDur = _duration.inSeconds;
+    final bool snapEmbed = _isEmbedMode;
+    final int snapPos =
+        snapEmbed ? _xpassPosition.round() : _position.inSeconds;
+    final int snapDur =
+        snapEmbed ? _xpassDuration.round() : _duration.inSeconds;
     final bool snapReady = _playerReady;
     unawaited(
       _persistProgressValues(
@@ -983,6 +1030,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _debugPlayer('lifecycle', <String, Object?>{'state': state.name});
+    // Embed (XPass) playback lives in a WebView; pause/resume it directly
+    // instead of tearing down and re-opening a [VideoPlayerController].
+    if (_isEmbedMode) {
+      switch (state) {
+        case AppLifecycleState.hidden:
+        case AppLifecycleState.paused:
+          _xpassController.pause();
+          unawaited(_persistProgress());
+          break;
+        case AppLifecycleState.resumed:
+          _xpassController.play();
+          break;
+        case AppLifecycleState.inactive:
+        case AppLifecycleState.detached:
+          break;
+      }
+      return;
+    }
     switch (state) {
       // Do not treat [inactive] as background: opening the notification shade,
       // volume HUD, or brief focus loss fires [inactive] then [resumed] without
@@ -1114,6 +1179,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  /// Receives state pushed up from [XpassEmbedPlayer]. Position/duration are
+  /// stored for [_persistProgress]; error/playing changes drive a rebuild.
+  void _onXpassStateChanged(XpassPlayerState state) {
+    if (!mounted) {
+      return;
+    }
+    _xpassPosition = state.position;
+    _xpassDuration = state.duration;
+    if (state.hasError && !_hasPlaybackError) {
+      setState(() {
+        _hasPlaybackError = true;
+        _playbackError = state.errorMessage ?? 'Embed playback failed.';
+      });
+      return;
+    }
+    if (state.isPlaying != _playing) {
+      setState(() {
+        _playing = state.isPlaying;
+      });
+    }
+  }
+
   /// Maps the OMSS-declared stream type to a [VideoFormat] so the platform
   /// player chooses the right media source for extension-less proxy URLs.
   static VideoFormat? _videoFormatHint(StreamPlayback playback) {
@@ -1135,6 +1222,40 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<void> _openStream({int? resumeFrom}) async {
+    // Embed sources (XPass) are rendered in a WebView — there is no
+    // [VideoPlayerController]. Tear down any prior controller, mark ready, and
+    // let [build] render [XpassEmbedPlayer]. Resume is handled inside the embed
+    // widget via its `ready` event.
+    if (_activeSourceIsEmbed) {
+      _videoStallTimer?.cancel();
+      if (resumeFrom != null && resumeFrom > 0) {
+        _resumeFromOverride = resumeFrom;
+      }
+      final VideoPlayerController? old = _controller;
+      if (old != null) {
+        old.removeListener(_onControllerUpdate);
+        await old.dispose();
+      }
+      _controller = null;
+      _xpassPosition = 0;
+      _xpassDuration = 0;
+      if (!mounted) {
+        return;
+      }
+      _debugPlayer('open.embed', _debugSourceFields());
+      setState(() {
+        _openingStream = false;
+        _playerReady = true;
+        _hasPlaybackError = false;
+        _playbackError = null;
+        _buffering = false;
+        _hasFirstVideoFrame = true;
+        _controlsLocked = false;
+        _controlsVisible = true;
+      });
+      return;
+    }
+
     final StreamPlayback playback = _activeStreamResult.stream;
     final String? url = _selectedQualityUrl ?? _resolvePlayableUrl(playback);
     // cinepro sets Referer / Origin / User-Agent server-side on the proxy URL.
@@ -1396,6 +1517,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   int? get _resolvedResumeFrom {
+    // Live TV never resumes — there is no stored progress to seek to.
+    if (widget.args.isLive) {
+      return null;
+    }
     if (_resumeFromOverride != null && _resumeFromOverride! > 0) {
       return _resumeFromOverride;
     }
@@ -1488,6 +1613,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _failedSourceUrls.add(_activeSource.resolvedUrl);
     OmssSource? next;
     for (final OmssSource s in _omssResponse.sources) {
+      // Never auto-fallback into the XPass embed — it is a manual,
+      // last-resort choice from the Sources sheet, not a silent failover.
+      if (s.isEmbed) {
+        continue;
+      }
       if (!_failedSourceUrls.contains(s.resolvedUrl)) {
         next = s;
         break;
@@ -1531,9 +1661,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<void> _persistProgress({bool refresh = true}) async {
+    // Embed mode has no [VideoPlayerController]; read position/duration from
+    // the XPass bridge instead.
+    final int positionSecs =
+        _isEmbedMode ? _xpassPosition.round() : _position.inSeconds;
+    final int durationSecs =
+        _isEmbedMode ? _xpassDuration.round() : _duration.inSeconds;
     await _persistProgressValues(
-      positionSecs: _position.inSeconds,
-      durationSecs: _duration.inSeconds,
+      positionSecs: positionSecs,
+      durationSecs: durationSecs,
       playerReady: _playerReady,
       refresh: refresh,
     );
@@ -1548,6 +1684,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     required bool playerReady,
     bool refresh = true,
   }) async {
+    // Live TV keeps no watch history — there is nothing to resume.
+    if (widget.args.isLive) {
+      return;
+    }
     if (!playerReady || positionSecs <= 0) {
       return;
     }
@@ -1695,6 +1835,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     sourceLabel: _sourceLabelForSettings,
                     subtitleLabel: _currentSubtitleLabel,
                     sourceSwitching: _sourceSwitching,
+                    // Embed (XPass) and Live streams expose no quality variants.
+                    showQuality: !_activeSourceIsEmbed && !_isLive,
                     onQualityTap: () async {
                       await _openQualitySheet();
                       setSheetState(() {});
@@ -1775,6 +1917,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
               currentProviderKey: _omssProviderKey(_activeSource),
               refreshing: _refreshingSources,
               switchingProviderKey: _pendingSourceId,
+              // Live channels carry a single source — there is nothing to
+              // refresh.
+              showRefresh: !_isLive,
               onRefreshSources: () {
                 unawaited(_runSourceProbeForCatalog());
               },
@@ -2537,6 +2682,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (_controlsLocked || !_playerReady) {
       return;
     }
+    // Live streams cannot be seeked — ignore double-tap skip gestures.
+    if (_isLive) {
+      return;
+    }
     final double width = MediaQuery.sizeOf(context).width;
     if (width <= 0) {
       return;
@@ -3078,11 +3227,58 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (error is SocketException) {
       return "Couldn't reach the resolver. Check your connection.";
     }
-    if (error is _NoSourcesError) {
-      return 'No playable sources for this title right now. '
-          'It may be too new, region-locked, or temporarily unavailable.';
-    }
     return 'Something went wrong while finding sources.';
+  }
+
+  /// Minimal overlay for XPass embed mode: a back button and a source-switch
+  /// button only. The XPass WebView renders its own transport controls, so we
+  /// deliberately omit the progress bar, play/pause, seek, and quality/subtitle
+  /// affordances here.
+  Widget _buildEmbedTopOverlay(BuildContext context, String title) {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.x2),
+          child: Row(
+            children: <Widget>[
+              IconButton(
+                onPressed: _exitPlayer,
+                tooltip: 'Back',
+                constraints: const BoxConstraints.tightFor(
+                  width: 44,
+                  height: 44,
+                ),
+                icon: const Icon(Icons.arrow_back_rounded),
+                color: AppColors.typeEmphasis,
+              ),
+              const SizedBox(width: AppSpacing.x2),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: AppColors.typeEmphasis,
+                      ),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.x2),
+              IconButton(
+                onPressed: () => unawaited(_openSourceSheet()),
+                tooltip: 'Switch source',
+                constraints: const BoxConstraints.tightFor(
+                  width: 44,
+                  height: 44,
+                ),
+                icon: const Icon(Icons.swap_horiz_rounded),
+                color: AppColors.typeEmphasis,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -3092,7 +3288,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
 
     final String title;
-    if (widget.args.mediaItem.isShow &&
+    if (_isLive) {
+      title = widget.args.liveChannelName ?? widget.args.mediaItem.title;
+    } else if (widget.args.mediaItem.isShow &&
         widget.args.season != null &&
         widget.args.episode != null) {
       title =
@@ -3101,23 +3299,32 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       title = widget.args.mediaItem.title;
     }
 
+    // In embed mode the XPass WebView renders its own player UI and handles its
+    // own touches; the outer gesture detector must defer to it so taps/scrolls
+    // reach the embed instead of toggling our (hidden) native controls.
+    final bool embed = _activeSourceIsEmbed;
+
     return PopScope(
       canPop: true,
       child: Scaffold(
         backgroundColor: AppColors.blackC50,
         body: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _handleScreenTap,
-          onDoubleTapDown: _handleDoubleTapDown,
+          behavior: embed
+              ? HitTestBehavior.deferToChild
+              : HitTestBehavior.opaque,
+          onTap: embed ? null : _handleScreenTap,
+          onDoubleTapDown: embed ? null : _handleDoubleTapDown,
           // [onDoubleTap] required so the framework actually waits for a
           // potential second tap before firing onTap (slight delay) instead
           // of dropping our [onDoubleTapDown] handler.
-          onDoubleTap: () {},
-          onVerticalDragStart: _onVerticalDragStart,
-          onVerticalDragUpdate: (DragUpdateDetails details) {
-            unawaited(_onVerticalDragUpdate(details));
-          },
-          onVerticalDragEnd: _onVerticalDragEnd,
+          onDoubleTap: embed ? null : () {},
+          onVerticalDragStart: embed ? null : _onVerticalDragStart,
+          onVerticalDragUpdate: embed
+              ? null
+              : (DragUpdateDetails details) {
+                  unawaited(_onVerticalDragUpdate(details));
+                },
+          onVerticalDragEnd: embed ? null : _onVerticalDragEnd,
           // Backdrop + video fill the entire screen (edge-to-edge, under the
           // display cutout) so playback is truly full-screen. Only the
           // controls/overlays below are wrapped in SafeArea.
@@ -3126,7 +3333,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             children: <Widget>[
               if (!_playerReady)
                 _PlayerBackdrop(mediaItem: widget.args.mediaItem),
-              Positioned.fill(
+              if (embed)
+                Positioned.fill(
+                  child: _playerReady
+                      ? XpassEmbedPlayer(
+                          embedUrl: _activeSource.url,
+                          controller: _xpassController,
+                          resumeFrom: _resolvedResumeFrom,
+                          onStateChanged: _onXpassStateChanged,
+                        )
+                      : const SizedBox.shrink(),
+                )
+              else
+                Positioned.fill(
                   child: IgnorePointer(
                     child: (_playerReady && _controller != null && _controller!.value.isInitialized)
                         ? AnimatedOpacity(
@@ -3280,30 +3499,35 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       ),
                     ),
                   ),
-                SafeArea(
-                  child: PlayerControls(
-                  visible: _controlsVisible && !_controlsLocked,
-                  mediaTitle: title,
-                  isPlaying: _playing,
-                  position: _position,
-                  duration: _duration,
-                  buffered: _buffer,
-                  showNextEpisode: _shouldShowNextEpisode,
-                  nextEpisodeLabel: _nextEpisodeTarget?.label,
-                  onBack: _exitPlayer,
-                  onPlayPause: _togglePlayback,
-                  onSeekBack: () => _seekRelative(-10),
-                  onSeekForward: () => _seekRelative(10),
-                  onSeek: _seekToFraction,
-                  onOpenSettings: _openPlayerSettingsSheet,
-                  onOpenBrightness: _openBrightnessSheet,
-                  onOpenVolume: _openVolumeSheet,
-                  autoRotate: !_landscapeLocked,
-                  onToggleAutoRotate: _toggleAutoRotate,
-                  onLock: _lockControls,
-                  onNextEpisode: _playNextEpisode,
+                if (embed)
+                  _buildEmbedTopOverlay(context, title)
+                else
+                  SafeArea(
+                    child: PlayerControls(
+                    visible: _controlsVisible && !_controlsLocked,
+                    mediaTitle: title,
+                    isPlaying: _playing,
+                    position: _position,
+                    duration: _duration,
+                    buffered: _buffer,
+                    isLive: _isLive,
+                    liveProgramTitle: widget.args.liveCurrentProgram,
+                    showNextEpisode: _shouldShowNextEpisode,
+                    nextEpisodeLabel: _nextEpisodeTarget?.label,
+                    onBack: _exitPlayer,
+                    onPlayPause: _togglePlayback,
+                    onSeekBack: () => _seekRelative(-10),
+                    onSeekForward: () => _seekRelative(10),
+                    onSeek: _seekToFraction,
+                    onOpenSettings: _openPlayerSettingsSheet,
+                    onOpenBrightness: _openBrightnessSheet,
+                    onOpenVolume: _openVolumeSheet,
+                    autoRotate: !_landscapeLocked,
+                    onToggleAutoRotate: _toggleAutoRotate,
+                    onLock: _lockControls,
+                    onNextEpisode: _playNextEpisode,
+                    ),
                   ),
-                ),
                 if (_subtitlesEnabled && _currentSubtitleText.isNotEmpty && _playerReady)
                   AnimatedPositioned(
                     duration: const Duration(milliseconds: 200),
@@ -3850,6 +4074,7 @@ class _SourcesCatalogSheet extends StatelessWidget {
     required this.switchingProviderKey,
     required this.onRefreshSources,
     required this.onPickProvider,
+    this.showRefresh = true,
   });
 
   /// Every OMSS source (all provider/quality pairs). Grouped by provider here.
@@ -3859,6 +4084,9 @@ class _SourcesCatalogSheet extends StatelessWidget {
   final String? switchingProviderKey;
   final VoidCallback onRefreshSources;
   final void Function(String providerKey) onPickProvider;
+
+  /// When false the "Refresh sources" footer is hidden (live = one source).
+  final bool showRefresh;
 
   @override
   Widget build(BuildContext context) {
@@ -3893,7 +4121,10 @@ class _SourcesCatalogSheet extends StatelessWidget {
               final List<OmssSource> providerVariants = variants[key]!;
               final bool isCurrent = key == currentProviderKey;
               final bool isSwitching = key == switchingProviderKey;
-              final String qualitySummary = _qualitySummary(providerVariants);
+              // Embed sources have no quality variants — label them plainly.
+              final String qualitySummary = source.isEmbed
+                  ? 'Embed Player'
+                  : _qualitySummary(providerVariants);
               return DecoratedBox(
                 decoration: BoxDecoration(
                   color: isCurrent
@@ -4029,23 +4260,25 @@ class _SourcesCatalogSheet extends StatelessWidget {
               );
             },
           ),
-        const Divider(color: AppColors.utilsDivider, height: AppSpacing.x4),
-        Text(
-          'cinepro returned these providers for this title. Pick one to '
-          'switch — choose a stream quality from the Quality menu. '
-          '"Refresh sources" re-issues the same request in case a previously '
-          'unavailable provider is back.',
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: AppColors.typeSecondary,
-              ),
-        ),
-        const SizedBox(height: AppSpacing.x2),
-        TextButton(
-          onPressed: refreshing ? null : onRefreshSources,
-          child: Text(
-            refreshing ? 'Refreshing…' : 'Refresh sources',
+        if (showRefresh) ...<Widget>[
+          const Divider(color: AppColors.utilsDivider, height: AppSpacing.x4),
+          Text(
+            'cinepro returned these providers for this title. Pick one to '
+            'switch — choose a stream quality from the Quality menu. '
+            '"Refresh sources" re-issues the same request in case a previously '
+            'unavailable provider is back.',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppColors.typeSecondary,
+                ),
           ),
-        ),
+          const SizedBox(height: AppSpacing.x2),
+          TextButton(
+            onPressed: refreshing ? null : onRefreshSources,
+            child: Text(
+              refreshing ? 'Refreshing…' : 'Refresh sources',
+            ),
+          ),
+        ],
       ],
       ),
     );
@@ -4139,6 +4372,7 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
     required this.onQualityTap,
     required this.onSourceTap,
     required this.onSubtitlesTap,
+    this.showQuality = true,
   });
 
   final String qualityLabel;
@@ -4148,6 +4382,10 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
   final VoidCallback onQualityTap;
   final VoidCallback onSourceTap;
   final VoidCallback onSubtitlesTap;
+
+  /// When false the Quality card is hidden (embed/live have no variants) and
+  /// the Source card spans the full width.
+  final bool showQuality;
 
   @override
   Widget build(BuildContext context) {
@@ -4159,50 +4397,59 @@ class _PlayerSettingsHomeSheet extends StatelessWidget {
         // Row children already fill internally, coming-soon tiles too.
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          // Two cards side-by-side: Quality + Source.
-          LayoutBuilder(
-            builder: (BuildContext context, BoxConstraints constraints) {
-              final bool stackCards = constraints.maxWidth < 360;
-              if (stackCards) {
-                return Column(
+          // Source card, optionally paired with a Quality card (hidden for
+          // embed/live streams which expose no quality variants).
+          if (!showQuality)
+            _PlayerSettingsCard(
+              title: 'Source',
+              subtitle: sourceLabel,
+              loading: sourceSwitching,
+              onTap: onSourceTap,
+            )
+          else
+            LayoutBuilder(
+              builder: (BuildContext context, BoxConstraints constraints) {
+                final bool stackCards = constraints.maxWidth < 360;
+                if (stackCards) {
+                  return Column(
+                    children: <Widget>[
+                      _PlayerSettingsCard(
+                        title: 'Quality',
+                        subtitle: qualityLabel,
+                        onTap: onQualityTap,
+                      ),
+                      SizedBox(height: metrics.itemGap),
+                      _PlayerSettingsCard(
+                        title: 'Source',
+                        subtitle: sourceLabel,
+                        loading: sourceSwitching,
+                        onTap: onSourceTap,
+                      ),
+                    ],
+                  );
+                }
+                return Row(
                   children: <Widget>[
-                    _PlayerSettingsCard(
-                      title: 'Quality',
-                      subtitle: qualityLabel,
-                      onTap: onQualityTap,
+                    Expanded(
+                      child: _PlayerSettingsCard(
+                        title: 'Quality',
+                        subtitle: qualityLabel,
+                        onTap: onQualityTap,
+                      ),
                     ),
-                    SizedBox(height: metrics.itemGap),
-                    _PlayerSettingsCard(
-                      title: 'Source',
-                      subtitle: sourceLabel,
-                      loading: sourceSwitching,
-                      onTap: onSourceTap,
+                    SizedBox(width: metrics.itemGap),
+                    Expanded(
+                      child: _PlayerSettingsCard(
+                        title: 'Source',
+                        subtitle: sourceLabel,
+                        loading: sourceSwitching,
+                        onTap: onSourceTap,
+                      ),
                     ),
                   ],
                 );
-              }
-              return Row(
-                children: <Widget>[
-                  Expanded(
-                    child: _PlayerSettingsCard(
-                      title: 'Quality',
-                      subtitle: qualityLabel,
-                      onTap: onQualityTap,
-                    ),
-                  ),
-                  SizedBox(width: metrics.itemGap),
-                  Expanded(
-                    child: _PlayerSettingsCard(
-                      title: 'Source',
-                      subtitle: sourceLabel,
-                      loading: sourceSwitching,
-                      onTap: onSourceTap,
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
+              },
+            ),
           SizedBox(height: metrics.itemGap),
           // Subtitles spans full width — replaces the old 2x2 layout that
           // also held a non-clickable "Audio" tile (always HLS).

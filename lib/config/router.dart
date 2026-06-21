@@ -4,6 +4,7 @@ import 'package:pstream_android/models/media_item.dart';
 import 'package:pstream_android/screens/detail_screen.dart';
 import 'package:pstream_android/screens/history_screen.dart';
 import 'package:pstream_android/screens/home_screen.dart';
+import 'package:pstream_android/screens/live_screen.dart';
 import 'package:pstream_android/screens/my_list_screen.dart';
 import 'package:pstream_android/screens/player_screen.dart';
 import 'package:pstream_android/screens/search_screen.dart';
@@ -87,6 +88,16 @@ final GoRouter appRouter = GoRouter(
               path: '/list',
               builder: (BuildContext context, GoRouterState state) {
                 return const MyListScreen();
+              },
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: <RouteBase>[
+            GoRoute(
+              path: '/live',
+              builder: (BuildContext context, GoRouterState state) {
+                return const LiveScreen();
               },
             ),
           ],
