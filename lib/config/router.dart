@@ -10,6 +10,9 @@ import 'package:pstream_android/screens/player_screen.dart';
 import 'package:pstream_android/screens/search_screen.dart';
 import 'package:pstream_android/screens/settings_screen.dart';
 import 'package:pstream_android/screens/splash_screen.dart';
+import 'package:pstream_android/screens/sports_screen.dart';
+import 'package:pstream_android/screens/sports_player_screen.dart';
+import 'package:pstream_android/models/sports_match.dart';
 import 'package:pstream_android/screens/watch_stats_screen.dart';
 import 'package:pstream_android/widgets/adaptive_nav.dart';
 
@@ -105,6 +108,16 @@ final GoRouter appRouter = GoRouter(
         StatefulShellBranch(
           routes: <RouteBase>[
             GoRoute(
+              path: '/sports',
+              builder: (BuildContext context, GoRouterState state) {
+                return const SportsScreen();
+              },
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: <RouteBase>[
+            GoRoute(
               path: '/settings',
               builder: (BuildContext context, GoRouterState state) {
                 return const SettingsScreen();
@@ -124,6 +137,13 @@ final GoRouter appRouter = GoRouter(
       path: '/watch-stats',
       builder: (BuildContext context, GoRouterState state) {
         return const WatchStatsScreen();
+      },
+    ),
+    GoRoute(
+      path: '/sports-player',
+      builder: (BuildContext context, GoRouterState state) {
+        final SportsMatch match = state.extra! as SportsMatch;
+        return SportsPlayerScreen(match: match);
       },
     ),
     GoRoute(

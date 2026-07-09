@@ -55,6 +55,17 @@ class AppConfig {
     return '$oracleUrl/$trimmed';
   }
 
+  /// Base URL for the `veil-streamed-sports` proxy (streamed.pk mirror) running
+  /// on the Oracle VM at port 3003. Overridable with `--dart-define=SPORTS_URL`.
+  /// Defaults to the public VM so the Sports tab works out of the box.
+  static String get sportsApiUrl {
+    const String raw = String.fromEnvironment(
+      'SPORTS_URL',
+      defaultValue: 'http://140.245.199.210:3003',
+    );
+    return _trimTrailingSlash(raw.trim());
+  }
+
   static String get tmdbReadToken =>
       const String.fromEnvironment('TMDB_TOKEN', defaultValue: '');
 
