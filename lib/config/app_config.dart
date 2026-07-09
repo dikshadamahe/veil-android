@@ -104,6 +104,27 @@ class AppConfig {
     return double.tryParse(rawValue) ?? 0.90;
   }
 
+  /// Optional direct URL to a `version.json` manifest. When empty, the app
+  /// falls back to the GitHub Releases API for [updateGithubOwner]/[updateGithubRepo].
+  static String? get updateManifestUrl {
+    const String raw = String.fromEnvironment(
+      'UPDATE_MANIFEST_URL',
+      defaultValue: '',
+    );
+    final String trimmed = raw.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  static String get updateGithubOwner => const String.fromEnvironment(
+        'UPDATE_GITHUB_OWNER',
+        defaultValue: 'dikshadamahe',
+      );
+
+  static String get updateGithubRepo => const String.fromEnvironment(
+        'UPDATE_GITHUB_REPO',
+        defaultValue: 'veil-android',
+      );
+
   static String _trimTrailingSlash(String value) {
     return value.replaceFirst(RegExp(r'/+$'), '');
   }

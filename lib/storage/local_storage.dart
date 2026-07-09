@@ -21,6 +21,9 @@ class LocalStorage {
   static const String prefKeySubtitleBgOpacity = 'pref_subtitle_bg_opacity';
   static const String prefKeyDoubleTapSeekSecs = 'pref_double_tap_seek_secs';
   static const String prefKeyHardwareAcceleration = 'pref_hardware_acceleration';
+  static const String prefKeyLastUpdateCheckAt = 'pref_last_update_check_at';
+  static const String prefKeyDismissedUpdateVersionCode =
+      'pref_dismissed_update_version_code';
 
   static const int doubleTapSeekDefaultSecs = 10;
   static const List<int> doubleTapSeekChoicesSecs = <int>[5, 10, 15, 30, 60];
@@ -32,7 +35,7 @@ class LocalStorage {
 
   // Subtitle style: stored as 0-100 ints / hex strings so Hive doesn't have
   // to track type adapters. Defaults match a comfortable mobile baseline.
-  static const int subtitleSizeDefault = 32; // media_kit `sub-font-size`
+  static const int subtitleSizeDefault = 32; // player subtitle overlay font size (pts)
   static const String subtitleColorDefault = '#FFFFFFFF';
   static const double subtitleBgOpacityDefault = 0.5;
 
@@ -304,7 +307,7 @@ class LocalStorage {
     await _prefsBox.put(prefKeySubtitlesDefaultOn, value);
   }
 
-  /// Subtitle font size in points (media_kit `sub-font-size`). Range 16–56.
+  /// Subtitle font size in points for the player overlay. Range 16–56.
   static int getSubtitleSize() {
     final dynamic raw = _prefsBox.get(prefKeySubtitleSize);
     if (raw is int) {
@@ -373,6 +376,38 @@ class LocalStorage {
 
   static Future<void> setHardwareAccelerationEnabled(bool value) async {
     await _prefsBox.put(prefKeyHardwareAcceleration, value);
+  }
+
+  /// Last successful in-app update check (UTC ISO-8601).
+  static DateTime? getLastUpdateCheckAt() {
+    final dynamic raw = _prefsBox.get(prefKeyLastUpdateCheckAt);
+    if (raw is! String || raw.isEmpty) {
+      return null;
+    }
+    return DateTime.tryParse(raw);
+  }
+
+  static Future<void> setLastUpdateCheckAt(DateTime value) async {
+    await _prefsBox.put(
+      prefKeyLastUpdateCheckAt,
+      value.toUtc().toIso8601String(),
+    );
+  }
+
+  /// Highest update [versionCode] the user dismissed with "Later".
+  static int? getDismissedUpdateVersionCode() {
+    final dynamic raw = _prefsBox.get(prefKeyDismissedUpdateVersionCode);
+    if (raw is int) {
+      return raw;
+    }
+    if (raw is String) {
+      return int.tryParse(raw);
+    }
+    return null;
+  }
+
+  static Future<void> setDismissedUpdateVersionCode(int value) async {
+    await _prefsBox.put(prefKeyDismissedUpdateVersionCode, value);
   }
 
   /// Aggregate watch statistics derived from existing boxes; no extra Hive

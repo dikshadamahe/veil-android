@@ -164,7 +164,27 @@ flutter build apk --release \
   --dart-define=TMDB_TOKEN=YOUR_TMDB_READ_TOKEN
 ```
 
-**CI / releases:** pushing a `v*` tag (or manual workflow dispatch) runs `flutter analyze` and builds `veil.apk`. Configure **`ORACLE_URL`** and **`TMDB_TOKEN`** (or **`TMDB_READ_TOKEN`**) as GitHub variables or secrets — the workflow fails fast if either is missing.
+**CI / releases:** pushing a `v*` tag (or manual **Release** workflow dispatch) runs `flutter analyze`, builds a **signed** `veil.apk`, and publishes a GitHub Release with `version.json` (for in-app updates).
+
+Required repository secrets for signed releases:
+
+| Secret | Purpose |
+|--------|---------|
+| `ORACLE_URL` (or variable) | Resolver base URL baked into the APK |
+| `TMDB_TOKEN` or `TMDB_READ_TOKEN` | TMDB read token |
+| `ANDROID_KEYSTORE_BASE64` | Base64-encoded `.jks` / `.keystore` |
+| `ANDROID_KEYSTORE_PASSWORD` | Keystore password |
+| `ANDROID_KEY_ALIAS` | Key alias |
+| `ANDROID_KEY_PASSWORD` | Key password |
+
+**In-app updates:** Settings → **App** → **Check for updates** polls `dikshadamahe/veil-android` GitHub Releases. Newer APKs install on top of older ones when they share the same `applicationId` and signing certificate and the new `versionCode` is higher. Bump `version:` in `pubspec.yaml` (e.g. `1.0.3+4`) before each tagged release.
+
+Generate a one-time upload keystore (do not commit it):
+
+```bash
+keytool -genkey -v -keystore upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+base64 -w0 upload-keystore.jks   # paste into ANDROID_KEYSTORE_BASE64
+```
 
 <details>
 <summary><strong>Optional defines</strong> — subtitles, watch rules</summary>
@@ -186,7 +206,7 @@ flutter build apk --release \
 | Path | Role |
 |------|------|
 | `lib/screens/` | Home, search, detail, player, settings, history, my list |
-| `lib/services/` | `tmdb_service.dart`, `stream_service.dart` (OMSS client) |
+| `lib/services/` | `tmdb_service.dart`, `stream_service.dart` (OMSS client), `app_update_service.dart` |
 | `lib/models/` | `media_item.dart`, `omss_source.dart`, `omss_response.dart` |
 | `lib/config/` | `app_config.dart`, `app_theme.dart`, `router.dart`, breakpoints |
 | `lib/storage/` | Hive — progress, bookmarks, continue watching |
