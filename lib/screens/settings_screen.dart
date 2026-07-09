@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:pstream_android/config/app_theme.dart';
 import 'package:pstream_android/config/breakpoints.dart';
+import 'package:pstream_android/models/app_update_info.dart';
+import 'package:pstream_android/providers/app_update_provider.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/storage/local_storage.dart';
 
@@ -160,6 +163,8 @@ class SettingsScreen extends ConsumerWidget {
                 ],
               ),
             ),
+            const SizedBox(height: AppSpacing.x4),
+            const _AppUpdatesSection(),
           ],
         ),
       ),
@@ -204,6 +209,212 @@ class MediaStat {
 
   final String label;
   final int value;
+}
+
+class _AppUpdatesSection extends ConsumerWidget {
+  const _AppUpdatesSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final AppUpdateState updateState = ref.watch(appUpdateControllerProvider);
+    final AsyncValue<PackageInfo> packageInfo =
+        ref.watch(installedPackageInfoProvider);
+    final String versionLabel = packageInfo.when(
+      data: (PackageInfo info) => '${info.version} (${info.buildNumber})',
+      loading: () {
+        final String? name = updateState.installedVersionName;
+        final int? code = updateState.installedVersionCode;
+        if (name != null && code != null) {
+          return '$name ($code)';
+        }
+        return 'Reading…';
+      },
+      error: (Object _, StackTrace stackTrace) => 'Unknown',
+    );
+
+    return _SettingsSection(
+      title: 'App',
+      subtitle:
+          'Check GitHub Releases for a newer APK and install it over this build.',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          _SettingsActionTile(
+            icon: Icons.system_update_alt_rounded,
+            title: 'Check for updates',
+            subtitle: 'Installed $versionLabel',
+            actionLabel: updateState.phase == AppUpdatePhase.checking
+                ? 'Checking…'
+                : 'Check',
+            onTap: updateState.phase == AppUpdatePhase.checking ||
+                    updateState.phase == AppUpdatePhase.downloading
+                ? () {}
+                : () async {
+                    await ref
+                        .read(appUpdateControllerProvider.notifier)
+                        .checkForUpdate(force: true);
+                    if (!context.mounted) {
+                      return;
+                    }
+                    final AppUpdateState next =
+                        ref.read(appUpdateControllerProvider);
+                    if (next.phase == AppUpdatePhase.upToDate) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('You are up to date')),
+                      );
+                    } else if (next.phase == AppUpdatePhase.error &&
+                        next.errorMessage != null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(next.errorMessage!)),
+                      );
+                    }
+                  },
+          ),
+          if (updateState.available != null) ...<Widget>[
+            const SizedBox(height: AppSpacing.x3),
+            _UpdateAvailableCard(
+              update: updateState.available!,
+              phase: updateState.phase,
+              progress: updateState.downloadProgress,
+              errorMessage: updateState.errorMessage,
+              onInstall: () async {
+                await ref
+                    .read(appUpdateControllerProvider.notifier)
+                    .downloadAndInstall();
+                if (!context.mounted) {
+                  return;
+                }
+                final AppUpdateState next =
+                    ref.read(appUpdateControllerProvider);
+                if (next.phase == AppUpdatePhase.error &&
+                    next.errorMessage != null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(next.errorMessage!)),
+                  );
+                } else if (next.phase == AppUpdatePhase.installing) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Opening installer — allow installs from Veil if prompted',
+                      ),
+                    ),
+                  );
+                }
+              },
+              onLater: () async {
+                await ref
+                    .read(appUpdateControllerProvider.notifier)
+                    .dismissAvailableUpdate();
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _UpdateAvailableCard extends StatelessWidget {
+  const _UpdateAvailableCard({
+    required this.update,
+    required this.phase,
+    required this.progress,
+    required this.onInstall,
+    required this.onLater,
+    this.errorMessage,
+  });
+
+  final AppUpdateInfo update;
+  final AppUpdatePhase phase;
+  final double progress;
+  final String? errorMessage;
+  final VoidCallback onInstall;
+  final VoidCallback onLater;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool busy = phase == AppUpdatePhase.downloading ||
+        phase == AppUpdatePhase.installing;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.blackC150,
+        borderRadius: BorderRadius.circular(AppSpacing.x4 + AppSpacing.x1),
+        border: Border.all(color: AppColors.dropdownBorder),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.x4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'Update available: ${update.versionName}',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: AppColors.typeEmphasis,
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+            const SizedBox(height: AppSpacing.x1),
+            Text(
+              'versionCode ${update.versionCode}'
+              '${update.mandatory ? ' · required' : ''}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            if (update.notes != null && update.notes!.trim().isNotEmpty) ...<
+                Widget>[
+              const SizedBox(height: AppSpacing.x3),
+              Text(
+                update.notes!.trim(),
+                maxLines: 6,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+            if (phase == AppUpdatePhase.downloading) ...<Widget>[
+              const SizedBox(height: AppSpacing.x3),
+              LinearProgressIndicator(value: progress.clamp(0, 1)),
+              const SizedBox(height: AppSpacing.x1),
+              Text(
+                'Downloading ${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
+                style: Theme.of(context).textTheme.labelMedium,
+              ),
+            ],
+            if (errorMessage != null &&
+                phase == AppUpdatePhase.error) ...<Widget>[
+              const SizedBox(height: AppSpacing.x2),
+              Text(
+                errorMessage!,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.typeDanger,
+                    ),
+              ),
+            ],
+            const SizedBox(height: AppSpacing.x4),
+            Row(
+              children: <Widget>[
+                if (!update.mandatory)
+                  TextButton(
+                    onPressed: busy ? null : onLater,
+                    child: const Text('Later'),
+                  ),
+                const Spacer(),
+                FilledButton(
+                  onPressed: busy ? null : onInstall,
+                  child: Text(
+                    phase == AppUpdatePhase.installing
+                        ? 'Installing…'
+                        : phase == AppUpdatePhase.downloading
+                            ? 'Downloading…'
+                            : 'Download & install',
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _SettingsProfileHeader extends StatelessWidget {

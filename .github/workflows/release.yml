@@ -67,6 +67,26 @@ jobs:
             exit 1
           fi
 
+      - name: Decode release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "::error::Release signing secrets are missing. Required: ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD."
+            echo "Without a stable upload keystore, in-app updates cannot install on top of previous APKs."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
+          printf '%s\n' \
+            "storePassword=$ANDROID_KEYSTORE_PASSWORD" \
+            "keyPassword=$ANDROID_KEY_PASSWORD" \
+            "keyAlias=$ANDROID_KEY_ALIAS" \
+            "storeFile=../upload-keystore.jks" \
+            > android/key.properties
+
       - name: Analyze
         run: flutter analyze
 
@@ -97,13 +117,72 @@ jobs:
 
           flutter "${BUILD_ARGS[@]}"
 
-      - name: Rename APK artifact
-        run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/veil.apk
+      - name: Prepare release artifacts
+        id: artifacts
+        run: |
+          VERSION_LINE=$(grep '^version:' pubspec.yaml | head -n1 | awk '{print $2}')
+          VERSION_NAME="${VERSION_LINE%%+*}"
+          VERSION_CODE="${VERSION_LINE##*+}"
+          TAG_NAME="${RELEASE_TAG}"
+          if [[ "$TAG_NAME" != v* ]]; then
+            TAG_NAME="v${VERSION_NAME}"
+          fi
+
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/veil.apk
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/veil-${TAG_NAME}.apk"
+          SHA256=$(sha256sum dist/veil.apk | awk '{print $1}')
+          RELEASED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          VERSION_NAME="$VERSION_NAME" \
+          VERSION_CODE="$VERSION_CODE" \
+          TAG_NAME="$TAG_NAME" \
+          SHA256="$SHA256" \
+          RELEASED_AT="$RELEASED_AT" \
+          GITHUB_REPOSITORY="${{ github.repository }}" \
+          python3 - <<'PY'
+          import json, os
+          payload = {
+            "versionName": os.environ["VERSION_NAME"],
+            "versionCode": int(os.environ["VERSION_CODE"]),
+            "tag": os.environ["TAG_NAME"],
+            "apkUrl": (
+              f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
+              f"/releases/download/{os.environ['TAG_NAME']}/veil.apk"
+            ),
+            "sha256": os.environ["SHA256"],
+            "mandatory": False,
+            "minVersionCode": 1,
+            "releasedAt": os.environ["RELEASED_AT"],
+          }
+          with open("dist/version.json", "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2)
+              handle.write("\n")
+          PY
+
+          {
+            echo "version_name=$VERSION_NAME"
+            echo "version_code=$VERSION_CODE"
+            echo "tag_name=$TAG_NAME"
+            echo "sha256=$SHA256"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ env.RELEASE_TAG }}
+          tag_name: ${{ steps.artifacts.outputs.tag_name }}
+          name: Veil ${{ steps.artifacts.outputs.version_name }}
+          generate_release_notes: true
           prerelease: false
-          files: build/app/outputs/flutter-apk/veil.apk
+          body: |
+            ## Veil ${{ steps.artifacts.outputs.version_name }}
+
+            - **versionCode:** `${{ steps.artifacts.outputs.version_code }}`
+            - **APK SHA-256:** `${{ steps.artifacts.outputs.sha256 }}`
+
+            Install over any previous release signed with the same upload keystore.
+            Builds that include in-app updates will detect this release automatically via `version.json`.
+          files: |
+            dist/veil.apk
+            dist/veil-${{ steps.artifacts.outputs.tag_name }}.apk
+            dist/version.json

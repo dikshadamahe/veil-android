@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:pstream_android/config/app_theme.dart';
 import 'package:pstream_android/config/router.dart';
+import 'package:pstream_android/providers/app_update_provider.dart';
 import 'package:pstream_android/providers/storage_provider.dart';
 import 'package:pstream_android/providers/tmdb_provider.dart';
 import 'package:pstream_android/storage/local_storage.dart';
@@ -26,6 +29,11 @@ class _VeilAppState extends ConsumerState<VeilApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(
+        ref.read(appUpdateControllerProvider.notifier).checkOnLaunch(),
+      );
+    });
   }
 
   @override
