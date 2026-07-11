@@ -99,15 +99,27 @@ class SportsMatch {
   }
 }
 
-/// One side of a match. `badge` is an image id resolved via `/v1/images/badge`.
+/// One side of a match.
+///
+/// - `badge` is a streamed.pk image id resolved via `/v1/images/badge`.
+/// - `logo` is an already-absolute crest URL supplied by the newer providers
+///   (StreamFree / WatchFooty, e.g. ESPN CDN). When present it is preferred.
 class MatchTeam {
-  const MatchTeam({required this.name, required this.badge});
+  const MatchTeam({required this.name, required this.badge, this.logo});
 
   final String name;
   final String? badge;
 
-  /// Absolute badge URL routed through the proxy, or null when absent.
+  /// Absolute team logo URL from newer providers, or null.
+  final String? logo;
+
+  /// Absolute crest URL: prefers the direct [logo], else the proxied [badge].
   String? get badgeUrl {
+    final String? l = logo;
+    if (l != null &&
+        (l.startsWith('http://') || l.startsWith('https://'))) {
+      return l;
+    }
     final String? b = badge;
     if (b == null || b.isEmpty) {
       return null;
@@ -118,6 +130,7 @@ class MatchTeam {
   factory MatchTeam.fromJson(Map<String, dynamic> json) => MatchTeam(
         name: '${json['name'] ?? ''}',
         badge: _optionalString(json['badge']),
+        logo: _optionalString(json['logo']),
       );
 }
 
@@ -137,6 +150,11 @@ class MatchSource {
   String get displayName {
     final String key = source.trim().toLowerCase();
     const Map<String, String> named = <String, String>{
+      // Newer merged providers (whole-provider sources).
+      'streamfree': 'StreamFree',
+      'watchfooty': 'WatchFooty',
+      'cdnlivetv': 'CDN Live TV',
+      // streamed.pk internal sub-sources.
       'alpha': 'Server 1',
       'bravo': 'Server 2',
       'charlie': 'Server 3',
