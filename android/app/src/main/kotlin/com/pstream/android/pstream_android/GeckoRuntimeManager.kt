@@ -67,7 +67,7 @@ object GeckoRuntimeManager {
             { extension ->
                 Log.i(
                     TAG,
-                    "$label ready: ${extension.metaData?.version ?: "unknown"}",
+                    "$label ready: ${extension?.metaData?.version ?: "unknown"}",
                 )
                 markExtensionReady()
             },
