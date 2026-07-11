@@ -87,18 +87,56 @@ jobs:
             "storeFile=../upload-keystore.jks" \
             > android/key.properties
 
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG_NAME="${RELEASE_TAG}"
+          if [[ "$TAG_NAME" != v* ]]; then
+            echo "::error::Release tag must start with 'v' (got: ${TAG_NAME})"
+            exit 1
+          fi
+          # Tag is the source of truth: v3.0.4 → versionName 3.0.4
+          VERSION_NAME="${TAG_NAME#v}"
+          if [[ ! "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag must be vMAJOR.MINOR.PATCH (got: ${TAG_NAME})"
+            exit 1
+          fi
+          MAJOR="${VERSION_NAME%%.*}"
+          REST="${VERSION_NAME#*.}"
+          MINOR="${REST%%.*}"
+          PATCH="${REST#*.}"
+          # Stable integer Android versionCode from the tag (3.0.4 → 30004).
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          APK_NAME="veil-${TAG_NAME}.apk"
+
+          # Keep pubspec in sync so local builds match the release tag.
+          sed -i -E "s/^version: .*/version: ${VERSION_NAME}+${VERSION_CODE}/" pubspec.yaml
+
+          {
+            echo "tag_name=$TAG_NAME"
+            echo "version_name=$VERSION_NAME"
+            echo "version_code=$VERSION_CODE"
+            echo "apk_name=$APK_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Release ${TAG_NAME} → versionName=${VERSION_NAME} versionCode=${VERSION_CODE} apk=${APK_NAME}"
+
       - name: Analyze
         run: flutter analyze
 
       # Mirrors local: flutter build apk --release \
       #   --dart-define=ORACLE_URL=...   (base URL with or without :3001)
       #   --dart-define=TMDB_TOKEN=...
+      # Tag drives --build-name / --build-number so the APK identity matches
+      # the GitHub release (not a stale pubspec like 1.0.2+3).
       - name: Build APK
         run: |
           BUILD_ARGS=(
             "build"
             "apk"
             "--release"
+            "--build-name=${{ steps.version.outputs.version_name }}"
+            "--build-number=${{ steps.version.outputs.version_code }}"
             "--dart-define=ORACLE_URL=${ORACLE_URL}"
             "--dart-define=TMDB_TOKEN=${TMDB_TOKEN}"
           )
@@ -120,18 +158,13 @@ jobs:
       - name: Prepare release artifacts
         id: artifacts
         run: |
-          VERSION_LINE=$(grep '^version:' pubspec.yaml | head -n1 | awk '{print $2}')
-          VERSION_NAME="${VERSION_LINE%%+*}"
-          VERSION_CODE="${VERSION_LINE##*+}"
-          TAG_NAME="${RELEASE_TAG}"
-          if [[ "$TAG_NAME" != v* ]]; then
-            TAG_NAME="v${VERSION_NAME}"
-          fi
+          TAG_NAME="${{ steps.version.outputs.tag_name }}"
+          VERSION_NAME="${{ steps.version.outputs.version_name }}"
+          VERSION_CODE="${{ steps.version.outputs.version_code }}"
+          APK_NAME="${{ steps.version.outputs.apk_name }}"
 
           mkdir -p dist
-          # Single APK asset named after the release tag (e.g. veil-v3.0.3.apk).
-          # Do not also upload a generic veil.apk — that duplicated the same file.
-          APK_NAME="veil-${TAG_NAME}.apk"
+          # Single APK asset named after the release tag (e.g. veil-v3.0.4.apk).
           cp build/app/outputs/flutter-apk/app-release.apk "dist/${APK_NAME}"
           SHA256=$(sha256sum "dist/${APK_NAME}" | awk '{print $1}')
           RELEASED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
