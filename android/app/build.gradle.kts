@@ -33,7 +33,8 @@ android {
         applicationId = "com.pstream.android.pstream_android"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // GeckoView 147 requires Android 8.0 (API 26) or newer.
+        minSdk = 26
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -66,4 +67,10 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // GeckoView stable 147 (2026-01-16). Keep pinned: engine updates can
+    // change WebExtension and media behavior and must be device-tested.
+    implementation("org.mozilla.geckoview:geckoview-omni:147.0.20260116091309")
 }
