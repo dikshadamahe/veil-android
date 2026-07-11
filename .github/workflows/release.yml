@@ -208,12 +208,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.artifacts.outputs.tag_name }}
-          name: Veil ${{ steps.artifacts.outputs.version_name }}
+          # Keep the release title identical to the git tag (e.g. v3.0.5).
+          # Do not rewrite "v…" into "Veil …".
+          name: ${{ steps.artifacts.outputs.tag_name }}
           generate_release_notes: true
           prerelease: false
           body: |
-            ## Veil ${{ steps.artifacts.outputs.version_name }}
+            ## ${{ steps.artifacts.outputs.tag_name }}
 
+            - **versionName:** `${{ steps.artifacts.outputs.version_name }}`
             - **versionCode:** `${{ steps.artifacts.outputs.version_code }}`
             - **APK:** `${{ steps.artifacts.outputs.apk_name }}`
             - **APK SHA-256:** `${{ steps.artifacts.outputs.sha256 }}`
