@@ -1,3 +1,5 @@
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -24,6 +26,94 @@ class SportsPlayerScreen extends ConsumerStatefulWidget {
 }
 
 class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
+  /// Injected at document start so the streamed embed's inner player iframe
+  /// never runs under a `sandbox` restriction.
+  ///
+  /// The `embed.st` embed page renders the real player inside a child
+  /// `<iframe sandbox="...">`. That player detects the sandbox and refuses to
+  /// start, showing "Remove sandbox attributes on the iframe tag" (or just a
+  /// black screen). The outer embed page is same-origin to us, so we strip the
+  /// `sandbox` attribute off every iframe element — via a `setAttribute` guard
+  /// (blocks it being set), a `MutationObserver` (catches dynamically added or
+  /// mutated iframes), and by forcing a reload of any iframe that already
+  /// loaded sandboxed.
+  static const String _stripSandboxJs = r'''
+(function () {
+  if (window.__pstreamSandboxStrip) { return; }
+  window.__pstreamSandboxStrip = true;
+
+  function strip(frame) {
+    try {
+      if (!frame || frame.tagName !== 'IFRAME') { return; }
+      if (!frame.hasAttribute('sandbox')) { return; }
+      frame.removeAttribute('sandbox');
+      var src = frame.getAttribute('src');
+      if (src) {
+        frame.setAttribute('src', src);
+      }
+    } catch (e) {}
+  }
+
+  var nativeSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    if (this && this.tagName === 'IFRAME' &&
+        String(name).toLowerCase() === 'sandbox') {
+      return;
+    }
+    return nativeSetAttribute.call(this, name, value);
+  };
+
+  function sweep(root) {
+    try {
+      var frames = (root || document).querySelectorAll('iframe[sandbox]');
+      for (var i = 0; i < frames.length; i++) { strip(frames[i]); }
+    } catch (e) {}
+  }
+
+  var observer = new MutationObserver(function (mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      var m = mutations[i];
+      if (m.type === 'attributes' && m.attributeName === 'sandbox') {
+        strip(m.target);
+        continue;
+      }
+      for (var j = 0; j < m.addedNodes.length; j++) {
+        var node = m.addedNodes[j];
+        if (node && node.nodeType === 1) {
+          if (node.tagName === 'IFRAME') { strip(node); }
+          if (node.querySelectorAll) { sweep(node); }
+        }
+      }
+    }
+  });
+
+  function start() {
+    sweep(document);
+    var target = document.documentElement || document;
+    observer.observe(target, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['sandbox'],
+    });
+  }
+
+  if (document.documentElement) {
+    start();
+  } else {
+    document.addEventListener('readystatechange', start, { once: true });
+  }
+})();
+''';
+
+  static final UnmodifiableListView<UserScript> _embedUserScripts =
+      UnmodifiableListView<UserScript>(<UserScript>[
+    UserScript(
+      source: _stripSandboxJs,
+      injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+    ),
+  ]);
+
   late MatchSource _selectedSource;
 
   /// User's explicit stream choice; null falls back to an auto-picked stream.
@@ -174,6 +264,7 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
           child: InAppWebView(
             key: ValueKey<String>(stream.embedUrl),
             initialUrlRequest: URLRequest(url: WebUri(stream.embedUrl)),
+            initialUserScripts: _embedUserScripts,
             initialSettings: InAppWebViewSettings(
               mediaPlaybackRequiresUserGesture: false,
               allowsInlineMediaPlayback: true,

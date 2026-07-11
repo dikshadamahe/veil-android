@@ -132,9 +132,10 @@ class AppUpdateService {
       final String name = (asset['name'] ?? '').toString().toLowerCase();
       if (name == 'version.json') {
         versionJsonAsset = asset;
-      } else if (name == 'veil.apk' || name.endsWith('.apk')) {
+      } else if (name.endsWith('.apk')) {
+        // Prefer tag-named assets (veil-vX.Y.Z.apk) over any other .apk.
         apkAsset ??= asset;
-        if (name == 'veil.apk') {
+        if (name.startsWith('veil-v') || name.startsWith('veil-')) {
           apkAsset = asset;
         }
       }
