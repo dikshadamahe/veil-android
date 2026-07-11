@@ -131,6 +131,33 @@ class MatchSource {
   /// Source-specific match id.
   final String id;
 
+  /// Human-friendly source label for the UI (raw ids like `admin` / `alpha`
+  /// are streamed.pk internal provider names and mean nothing to users).
+  /// Falls back to a capitalized form for unknown ids.
+  String get displayName {
+    final String key = source.trim().toLowerCase();
+    const Map<String, String> named = <String, String>{
+      'alpha': 'Server 1',
+      'bravo': 'Server 2',
+      'charlie': 'Server 3',
+      'delta': 'Server 4',
+      'echo': 'Server 5',
+      'foxtrot': 'Server 6',
+      'golf': 'Server 7',
+      'hotel': 'Server 8',
+      'intel': 'Server 9',
+      'admin': 'Main',
+    };
+    final String? mapped = named[key];
+    if (mapped != null) {
+      return mapped;
+    }
+    if (key.isEmpty) {
+      return 'Source';
+    }
+    return key[0].toUpperCase() + key.substring(1);
+  }
+
   factory MatchSource.fromJson(Map<String, dynamic> json) => MatchSource(
         source: '${json['source'] ?? ''}',
         id: '${json['id'] ?? ''}',

@@ -111,13 +111,34 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
     UserScript(
       source: _stripSandboxJs,
       injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+      // The real player lives in a (often cross-origin) child iframe, so the
+      // strip must run in every frame — each frame un-sandboxes its own
+      // children — not just the top document.
+      forMainFrameOnly: false,
     ),
   ]);
+
+  /// Real Chrome-on-Android User-Agent.
+  ///
+  /// The default Android WebView UA contains a `; wv` token (and a
+  /// `Version/4.0` fragment). The `embed.st` player detects that WebView
+  /// signature, refuses to start, and instead renders the raw UA string with a
+  /// perpetual spinner (the "sandbox attributes on the iframe tag" symptom).
+  /// Presenting a normal mobile-Chrome UA — with no `wv` — lets the embed play.
+  static const String _embedUserAgent =
+      'Mozilla/5.0 (Linux; Android 13; Pixel 7) '
+      'AppleWebKit/537.36 (KHTML, like Gecko) '
+      'Chrome/128.0.0.0 Mobile Safari/537.36';
 
   late MatchSource _selectedSource;
 
   /// User's explicit stream choice; null falls back to an auto-picked stream.
   MatchStream? _selectedStream;
+
+  /// The stream currently on screen (chosen or auto-picked). Captured in
+  /// [build] so the picker can highlight it. Not part of widget state — never
+  /// mutated via setState.
+  MatchStream? _activeStream;
 
   bool _overlayVisible = true;
   bool _webLoading = true;
@@ -181,6 +202,7 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
         return _StreamPickerSheet(
           match: widget.match,
           initialSource: _selectedSource,
+          activeStream: _activeStream,
         );
       },
     );
@@ -209,6 +231,7 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
         body: streamsAsync.when(
           data: (List<MatchStream> streams) {
             final MatchStream? active = _resolveActive(streams);
+            _activeStream = active;
             if (active == null) {
               return _MessageView(
                 icon: Icons.videocam_off_rounded,
@@ -266,8 +289,10 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
             initialUrlRequest: URLRequest(url: WebUri(stream.embedUrl)),
             initialUserScripts: _embedUserScripts,
             initialSettings: InAppWebViewSettings(
+              userAgent: _embedUserAgent,
               mediaPlaybackRequiresUserGesture: false,
               allowsInlineMediaPlayback: true,
+              iframeAllowFullscreen: true,
               javaScriptEnabled: true,
               javaScriptCanOpenWindowsAutomatically: false,
               supportZoom: false,
@@ -350,7 +375,7 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
                                 ),
                       ),
                       Text(
-                        '${_selectedSource.source} · ${stream.label}',
+                        '${_selectedSource.displayName} · ${stream.label}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -377,10 +402,17 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
 /// Bottom sheet to pick a source and one of its streams. Pops with the
 /// selected `(source, stream)` record.
 class _StreamPickerSheet extends ConsumerStatefulWidget {
-  const _StreamPickerSheet({required this.match, required this.initialSource});
+  const _StreamPickerSheet({
+    required this.match,
+    required this.initialSource,
+    this.activeStream,
+  });
 
   final SportsMatch match;
   final MatchSource initialSource;
+
+  /// The stream currently playing, so its tile can be marked as selected.
+  final MatchStream? activeStream;
 
   @override
   ConsumerState<_StreamPickerSheet> createState() => _StreamPickerSheetState();
@@ -438,7 +470,7 @@ class _StreamPickerSheetState extends ConsumerState<_StreamPickerSheet> {
                     padding: const EdgeInsets.only(right: AppSpacing.x2),
                     child: Center(
                       child: ChoiceChip(
-                        label: Text(s.source),
+                        label: Text(s.displayName),
                         selected: selected,
                         onSelected: (_) => setState(() => _source = s),
                       ),
@@ -465,7 +497,15 @@ class _StreamPickerSheetState extends ConsumerState<_StreamPickerSheet> {
                     itemCount: streams.length,
                     itemBuilder: (BuildContext context, int index) {
                       final MatchStream stream = streams[index];
+                      final MatchStream? active = widget.activeStream;
+                      final bool isActive = active != null &&
+                          active.source == stream.source &&
+                          active.id == stream.id &&
+                          active.streamNo == stream.streamNo;
                       return ListTile(
+                        selected: isActive,
+                        selectedTileColor:
+                            AppColors.typeLink.withValues(alpha: 0.12),
                         leading: Icon(
                           stream.hd
                               ? Icons.hd_rounded
@@ -476,6 +516,12 @@ class _StreamPickerSheetState extends ConsumerState<_StreamPickerSheet> {
                         ),
                         title: Text(stream.label),
                         subtitle: Text('Stream ${stream.streamNo}'),
+                        trailing: isActive
+                            ? const Icon(
+                                Icons.check_circle_rounded,
+                                color: AppColors.typeLink,
+                              )
+                            : null,
                         onTap: () => Navigator.of(context).pop(
                           (source: _source, stream: stream),
                         ),
