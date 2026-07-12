@@ -38,6 +38,17 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // Ship a single universal APK (the in-app updater and GitHub release
+        // flow expect one .apk), but package only arm64-v8a. GeckoView bundles
+        // its full native engine (~30 MB) per ABI, so the emulator-only x86_64
+        // and legacy 32-bit armeabi-v7a slices were pure dead weight. GeckoView
+        // already requires API 26+, where 32-bit-only devices are effectively
+        // extinct, so arm64-only covers every real target device and cuts the
+        // release APK roughly in half.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     signingConfigs {
