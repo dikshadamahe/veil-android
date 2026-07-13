@@ -254,7 +254,7 @@ iframe[src*="googlesyndication" i],
             trigger: ContentBlockerTrigger(
               urlFilter: _toUrlFilter(fragment),
             ),
-            action: const ContentBlockerAction(
+            action: ContentBlockerAction(
               type: ContentBlockerActionType.BLOCK,
             ),
           ),
@@ -314,7 +314,7 @@ iframe[src*="googlesyndication" i],
     }
 
     // Subframe / iframe loads: only cancel known ad URLs (handled above).
-    if (!(action.isForMainFrame ?? true)) {
+    if (!action.isForMainFrame) {
       return NavigationActionPolicy.ALLOW;
     }
 
