@@ -6,14 +6,14 @@ import 'package:pstream_android/config/app_theme.dart';
 import 'package:pstream_android/models/match_stream.dart';
 import 'package:pstream_android/models/sports_match.dart';
 import 'package:pstream_android/providers/sports_provider.dart';
-import 'package:pstream_android/widgets/gecko_embed_view.dart';
+import 'package:pstream_android/widgets/sports_embed_view.dart';
 
 /// Fullscreen iframe-embed player for a sports match.
 ///
 /// streamed.pk streams are third-party **iframe embeds** (e.g. `embed.st/...`),
-/// not HLS/MP4, so playback happens inside GeckoView rather than ExoPlayer.
-/// uBlock Origin and a sandbox-removal content script run as built-in Gecko
-/// WebExtensions.
+/// not HLS/MP4, so playback happens inside a WebView rather than ExoPlayer.
+/// Ad / betting popups are suppressed and the iframe sandbox is stripped by
+/// the WebView ad blocker so the embedded player runs.
 class SportsPlayerScreen extends ConsumerStatefulWidget {
   const SportsPlayerScreen({super.key, required this.match});
 
@@ -24,9 +24,9 @@ class SportsPlayerScreen extends ConsumerStatefulWidget {
 }
 
 class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
-  /// Browser UA without Android WebView's `; wv` marker. This known-good
-  /// Chrome-compatible value is retained until embed.st is device-verified
-  /// against Gecko's default Firefox UA.
+  /// Browser UA without Android WebView's `; wv` marker. Some embed hosts
+  /// serve a degraded or blocked page to the stock WebView UA, so we present a
+  /// plain Chrome-on-Android string instead.
   static const String _embedUserAgent =
       'Mozilla/5.0 (Linux; Android 13; Pixel 7) '
       'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -186,7 +186,7 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
       children: <Widget>[
         GestureDetector(
           onTap: () => setState(() => _overlayVisible = !_overlayVisible),
-          child: GeckoEmbedView(
+          child: SportsEmbedView(
             key: ValueKey<String>(stream.embedUrl),
             url: stream.embedUrl,
             userAgent: _embedUserAgent,
@@ -195,7 +195,7 @@ class _SportsPlayerScreenState extends ConsumerState<SportsPlayerScreen> {
                 setState(() => _webLoading = false);
               }
             },
-            onError: (GeckoLoadError error) {
+            onError: (String? error) {
               if (mounted) {
                 setState(() => _webLoading = false);
               }
