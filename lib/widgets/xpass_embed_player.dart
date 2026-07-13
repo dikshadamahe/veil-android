@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../config/app_theme.dart';
+import '../utils/webview_ad_blocker.dart';
 
 /// Immutable snapshot of the XPass embed player state, pushed upward to the
 /// host [PlayerScreen] via [XpassEmbedPlayer.onStateChanged].
@@ -222,13 +223,17 @@ window.addEventListener('message', function(e) {
       color: AppColors.blackC50,
       child: InAppWebView(
         initialUrlRequest: URLRequest(url: WebUri(widget.embedUrl)),
-        initialSettings: InAppWebViewSettings(
-          transparentBackground: true,
-          mediaPlaybackRequiresUserGesture: false,
-          allowsInlineMediaPlayback: true,
-          javaScriptEnabled: true,
-          supportZoom: false,
-        ),
+        initialUserScripts: WebViewAdBlocker.antiPopupUserScripts,
+        initialSettings: WebViewAdBlocker.embedSettings(),
+        shouldOverrideUrlLoading: (
+          InAppWebViewController controller,
+          NavigationAction action,
+        ) async {
+          return WebViewAdBlocker.shouldAllowNavigation(
+            action: action,
+            embedOrigin: Uri.parse(widget.embedUrl),
+          );
+        },
         onWebViewCreated: (InAppWebViewController controller) {
           _webController = controller;
           controller.addJavaScriptHandler(
@@ -242,6 +247,7 @@ window.addEventListener('message', function(e) {
         onLoadStop: (InAppWebViewController controller, WebUri? url) async {
           await controller.evaluateJavascript(source: _listenerJs);
         },
+        onCreateWindow: WebViewAdBlocker.refuseCreateWindow,
         onReceivedError: (
           InAppWebViewController controller,
           WebResourceRequest request,

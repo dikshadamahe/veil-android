@@ -33,22 +33,10 @@ android {
         applicationId = "com.pstream.android.pstream_android"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        // GeckoView 147 requires Android 8.0 (API 26) or newer.
-        minSdk = 26
+        minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-
-        // Ship a single universal APK (the in-app updater and GitHub release
-        // flow expect one .apk), but package only arm64-v8a. GeckoView bundles
-        // its full native engine (~30 MB) per ABI, so the emulator-only x86_64
-        // and legacy 32-bit armeabi-v7a slices were pure dead weight. GeckoView
-        // already requires API 26+, where 32-bit-only devices are effectively
-        // extinct, so arm64-only covers every real target device and cuts the
-        // release APK roughly in half.
-        ndk {
-            abiFilters += "arm64-v8a"
-        }
     }
 
     signingConfigs {
@@ -78,10 +66,4 @@ android {
 
 flutter {
     source = "../.."
-}
-
-dependencies {
-    // GeckoView stable 147 (2026-01-16). Keep pinned: engine updates can
-    // change WebExtension and media behavior and must be device-tested.
-    implementation("org.mozilla.geckoview:geckoview-omni:147.0.20260116091309")
 }
